@@ -135,14 +135,14 @@
         return $value
     }
     $stepTitles = @(
-        '1/8 - Verbindung', '2/8 - Tabelle waehlen', '3/8 - Spalte waehlen', '4/8 - Min/Max-Vorschau',
-        '5/8 - Granularitaet && Filegroups', '6/8 - Boundary-Vorschau', '7/8 - Archiv && Retention (optional)',
-        '8/8 - Zusammenfassung && Ausfuehren'
+        '1/8 - Connection', '2/8 - Select Table', '3/8 - Select Column', '4/8 - Min/Max Preview',
+        '5/8 - Granularity && Filegroups', '6/8 - Boundary Preview', '7/8 - Archive && Retention (optional)',
+        '8/8 - Summary && Execute'
     )
 
     # ----- Hauptfenster ------------------------------------------------------------------
     $form = New-Object System.Windows.Forms.Form
-    $form.Text          = 'sqmPartitionTool - Partitionierungs-Assistent | powershelldba.de'
+    $form.Text          = 'sqmPartitionTool - Partitioning Wizard | powershelldba.de'
     $form.Size          = New-Object System.Drawing.Size(980, 720)
     $form.MinimumSize   = New-Object System.Drawing.Size(780, 560)
     $form.StartPosition = 'CenterScreen'
@@ -181,19 +181,19 @@
     $lblStatus.Text = ''
 
     $btnBack = New-Object System.Windows.Forms.Button
-    $btnBack.Text = '< Zurueck'
+    $btnBack.Text = '< Back'
     $btnBack.Location = New-Object System.Drawing.Point(680, 8)
     $btnBack.Size = New-Object System.Drawing.Size(90, 30)
     & $styleButton $btnBack
 
     $btnNext = New-Object System.Windows.Forms.Button
-    $btnNext.Text = 'Weiter >'
+    $btnNext.Text = 'Next >'
     $btnNext.Location = New-Object System.Drawing.Point(778, 8)
     $btnNext.Size = New-Object System.Drawing.Size(90, 30)
     & $styleButton $btnNext
 
     $btnCancel = New-Object System.Windows.Forms.Button
-    $btnCancel.Text = 'Abbrechen'
+    $btnCancel.Text = 'Cancel'
     $btnCancel.Location = New-Object System.Drawing.Point(876, 8)
     $btnCancel.Size = New-Object System.Drawing.Size(90, 30)
     & $styleButton $btnCancel
@@ -225,7 +225,7 @@
     $p0.BackColor = $cPanel
 
     $lbl0a = New-Object System.Windows.Forms.Label
-    $lbl0a.Text = 'SQL-Instanz:'
+    $lbl0a.Text = 'SQL Instance:'
     $lbl0a.Location = New-Object System.Drawing.Point(4, 14)
     $lbl0a.AutoSize = $true
     $lbl0a.ForeColor = $cDim
@@ -238,13 +238,13 @@
     $txt0Instance.Text = if ($SqlInstance) { $SqlInstance } else { $env:COMPUTERNAME }
 
     $btn0Connect = New-Object System.Windows.Forms.Button
-    $btn0Connect.Text = 'Verbinden'
+    $btn0Connect.Text = 'Connect'
     $btn0Connect.Location = New-Object System.Drawing.Point(410, 8)
     $btn0Connect.Size = New-Object System.Drawing.Size(100, 28)
     & $styleButton $btn0Connect
 
     $lbl0b = New-Object System.Windows.Forms.Label
-    $lbl0b.Text = 'Datenbank:'
+    $lbl0b.Text = 'Database:'
     $lbl0b.Location = New-Object System.Drawing.Point(4, 54)
     $lbl0b.AutoSize = $true
     $lbl0b.ForeColor = $cDim
@@ -263,7 +263,7 @@
     $p0.Controls.Add($cmb0Database)
 
     $btn0Connect.Add_Click({
-        Set-Status "Verbinde mit '$($txt0Instance.Text.Trim())' ..." 'Info'
+        Set-Status "Connecting to '$($txt0Instance.Text.Trim())' ..." 'Info'
         try
         {
             $cp = $script:connParams
@@ -271,9 +271,9 @@
             $cmb0Database.Items.Clear()
             foreach ($d in $dbs) { [void]$cmb0Database.Items.Add($d.Name) }
             if ($cmb0Database.Items.Count -gt 0) { $cmb0Database.SelectedIndex = 0 }
-            Set-Status "$($dbs.Count) Datenbank(en) gefunden." 'OK'
+            Set-Status "$($dbs.Count) database(s) found." 'OK'
         }
-        catch { Set-Status "Fehler: $($_.Exception.Message)" 'Error' }
+        catch { Set-Status "Error: $($_.Exception.Message)" 'Error' }
     })
 
     # ===================================================================================
@@ -286,10 +286,10 @@
     & $styleGrid $grid1
     foreach ($c in @(
             @{ N = 'Schema'; H = 'Schema'; W = 100 }
-            @{ N = 'Tabelle'; H = 'Tabelle'; W = 200 }
-            @{ N = 'Zeilen'; H = 'Zeilen'; W = 100 }
-            @{ N = 'GroesseMB'; H = 'Groesse (MB)'; W = 100 }
-            @{ N = 'Typ'; H = 'Typ'; W = 90 }
+            @{ N = 'Tabelle'; H = 'Table'; W = 200 }
+            @{ N = 'Zeilen'; H = 'Rows'; W = 100 }
+            @{ N = 'GroesseMB'; H = 'Size (MB)'; W = 100 }
+            @{ N = 'Typ'; H = 'Type'; W = 90 }
             @{ N = 'Status'; H = 'Status'; W = 130 }
         ))
     {
@@ -302,20 +302,20 @@
     function Load-Step1
     {
         $grid1.Rows.Clear()
-        Set-Status "Lade Tabellen aus '$($script:wiz.Database)' ..." 'Info'
+        Set-Status "Loading tables from '$($script:wiz.Database)' ..." 'Info'
         try
         {
             $cp = $script:connParams
             $tables = Get-sqmPartitionCandidateTable @cp -SqlInstance $script:wiz.SqlInstance -Database $script:wiz.Database -IncludeAlreadyPartitioned -ErrorAction Stop
             foreach ($t in $tables)
             {
-                $status = if ($t.IsPartitioned) { 'bereits partitioniert' } else { 'Kandidat' }
+                $status = if ($t.IsPartitioned) { 'already partitioned' } else { 'Candidate' }
                 $rowIdx = $grid1.Rows.Add($t.SchemaName, $t.TableName, $t.RowCount, (_FormatDisplayValue $t.SizeMB), $(if ($t.IsHeap) { 'Heap' } else { 'Clustered' }), $status)
                 if ($t.IsPartitioned) { $grid1.Rows[$rowIdx].DefaultCellStyle.ForeColor = $cDim }
             }
-            Set-Status "$($tables.Count) Tabelle(n) gefunden." 'OK'
+            Set-Status "$($tables.Count) table(s) found." 'OK'
         }
-        catch { Set-Status "Fehler: $($_.Exception.Message)" 'Error' }
+        catch { Set-Status "Error: $($_.Exception.Message)" 'Error' }
     }
 
     # ===================================================================================
@@ -327,10 +327,10 @@
     $grid2 = New-Object System.Windows.Forms.DataGridView
     & $styleGrid $grid2
     foreach ($c in @(
-            @{ N = 'Spalte'; H = 'Spalte'; W = 200 }
-            @{ N = 'Typ'; H = 'Datentyp'; W = 120 }
+            @{ N = 'Spalte'; H = 'Column'; W = 200 }
+            @{ N = 'Typ'; H = 'Data Type'; W = 120 }
             @{ N = 'Nullable'; H = 'Nullable'; W = 80 }
-            @{ N = 'Kompatibel'; H = 'Kompatibel'; W = 100 }
+            @{ N = 'Kompatibel'; H = 'Compatible'; W = 100 }
         ))
     {
         $col = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
@@ -342,19 +342,19 @@
     function Load-Step2
     {
         $grid2.Rows.Clear()
-        Set-Status "Lade Spalten von '$($script:wiz.SchemaName).$($script:wiz.TableName)' ..." 'Info'
+        Set-Status "Loading columns from '$($script:wiz.SchemaName).$($script:wiz.TableName)' ..." 'Info'
         try
         {
             $cp = $script:connParams
             $cols = Get-sqmPartitionColumnCandidate @cp -SqlInstance $script:wiz.SqlInstance -Database $script:wiz.Database -Schema $script:wiz.SchemaName -Table $script:wiz.TableName -ErrorAction Stop
             foreach ($c in $cols)
             {
-                $rowIdx = $grid2.Rows.Add($c.ColumnName, $c.DataType, $(if ($c.IsNullable) { 'Ja' } else { 'Nein' }), $(if ($c.IsPartitionTypeCompatible) { 'Ja' } else { 'Nein' }))
+                $rowIdx = $grid2.Rows.Add($c.ColumnName, $c.DataType, $(if ($c.IsNullable) { 'Yes' } else { 'No' }), $(if ($c.IsPartitionTypeCompatible) { 'Yes' } else { 'No' }))
                 if (-not $c.IsPartitionTypeCompatible) { $grid2.Rows[$rowIdx].DefaultCellStyle.ForeColor = $cDim }
             }
-            Set-Status "$($cols.Count) Spalte(n) gefunden. Inkompatible Typen sind ausgegraut." 'OK'
+            Set-Status "$($cols.Count) column(s) found. Incompatible types are grayed out." 'OK'
         }
-        catch { Set-Status "Fehler: $($_.Exception.Message)" 'Error' }
+        catch { Set-Status "Error: $($_.Exception.Message)" 'Error' }
     }
 
     # ===================================================================================
@@ -371,7 +371,7 @@
     $lbl3Info.Text = ''
 
     $lbl3Manual = New-Object System.Windows.Forms.Label
-    $lbl3Manual.Text = 'Tabelle ist leer - manuelle Werte (Start[,Ende]) angeben, z.B. 2025-01-01:'
+    $lbl3Manual.Text = 'Table is empty - enter manual values (start[,end]), e.g. 2025-01-01:'
     $lbl3Manual.Location = New-Object System.Drawing.Point(4, 110)
     $lbl3Manual.AutoSize = $true
     $lbl3Manual.ForeColor = $cWarn
@@ -400,7 +400,7 @@
 
     function Load-Step3
     {
-        Set-Status "Ermittle Min/Max von '$($script:wiz.PartitionColumn)' ..." 'Info'
+        Set-Status "Determining min/max of '$($script:wiz.PartitionColumn)' ..." 'Info'
         try
         {
             $cp = $script:connParams
@@ -412,19 +412,19 @@
 
             if ($range.IsEmpty)
             {
-                $lbl3Info.Text = "'$($script:wiz.SchemaName).$($script:wiz.TableName)' ist leer (0 Zeilen)."
+                $lbl3Info.Text = "'$($script:wiz.SchemaName).$($script:wiz.TableName)' is empty (0 rows)."
                 $lbl3Manual.Visible = $true; $txt3Start.Visible = $true; $txt3End.Visible = $true
-                Set-Status 'Tabelle ist leer - manuelle Start-/Endwerte erforderlich.' 'Warn'
+                Set-Status 'Table is empty - manual start/end values required.' 'Warn'
             }
             else
             {
                 $lbl3Manual.Visible = $false; $txt3Start.Visible = $false; $txt3End.Visible = $false
-                $lbl3Info.Text = "Zeilen: $($range.RowCount)`r`nMinValue: $(_FormatDisplayValue $range.MinValue)`r`nMaxValue: $(_FormatDisplayValue $range.MaxValue)`r`n" +
-                    $(if ($range.SuggestedGranularity) { "Vorschlag Granularitaet: $($range.SuggestedGranularity) (bei Schritt 5 anpassbar)" } else { '' })
-                Set-Status 'Min/Max ermittelt.' 'OK'
+                $lbl3Info.Text = "Rows: $($range.RowCount)`r`nMinValue: $(_FormatDisplayValue $range.MinValue)`r`nMaxValue: $(_FormatDisplayValue $range.MaxValue)`r`n" +
+                    $(if ($range.SuggestedGranularity) { "Suggested granularity: $($range.SuggestedGranularity) (adjustable in step 5)" } else { '' })
+                Set-Status 'Min/max determined.' 'OK'
             }
         }
-        catch { Set-Status "Fehler: $($_.Exception.Message)" 'Error' }
+        catch { Set-Status "Error: $($_.Exception.Message)" 'Error' }
     }
 
     # ===================================================================================
@@ -435,7 +435,7 @@
     $p4.BackColor = $cPanel
 
     $lbl4a = New-Object System.Windows.Forms.Label
-    $lbl4a.Text = 'Granularitaet:'
+    $lbl4a.Text = 'Granularity:'
     $lbl4a.Location = New-Object System.Drawing.Point(4, 12)
     $lbl4a.AutoSize = $true
     $lbl4a.ForeColor = $cDim
@@ -448,7 +448,7 @@
     [void]$cmb4Gran.Items.AddRange(@('Month', 'Quarter', 'Year'))
 
     $lbl4b = New-Object System.Windows.Forms.Label
-    $lbl4b.Text = 'Filegroup-Strategie:'
+    $lbl4b.Text = 'Filegroup Strategy:'
     $lbl4b.Location = New-Object System.Drawing.Point(4, 52)
     $lbl4b.AutoSize = $true
     $lbl4b.ForeColor = $cDim
@@ -458,11 +458,11 @@
     $cmb4Fg.BackColor = $cWindow
     $cmb4Fg.ForeColor = $cText
     $cmb4Fg.DropDownStyle = 'DropDownList'
-    [void]$cmb4Fg.Items.AddRange(@('Single (empfohlen)', 'PerPeriod'))
+    [void]$cmb4Fg.Items.AddRange(@('Single (recommended)', 'PerPeriod'))
     $cmb4Fg.SelectedIndex = 0
 
     $lbl4c = New-Object System.Windows.Forms.Label
-    $lbl4c.Text = 'Zukuenftige leere Perioden (Puffer):'
+    $lbl4c.Text = 'Future empty periods (buffer):'
     $lbl4c.Location = New-Object System.Drawing.Point(4, 92)
     $lbl4c.AutoSize = $true
     $lbl4c.ForeColor = $cDim
@@ -495,7 +495,7 @@
                 $spanMonths = [math]::Ceiling(([datetime]$script:wiz.MaxValue - [datetime]$script:wiz.MinValue).TotalDays / 30) + [int]$num4Buffer.Value
                 if ($spanMonths -gt 24)
                 {
-                    $lbl4Warn.Text = "Warnung: Month + PerPeriod erzeugt ca. $spanMonths Filegroups/Dateien fuer diesen Zeitraum - deutlich mehr Betriebsaufwand als 'Single'. 'Single' oder eine groebere Granularitaet erwaegen."
+                    $lbl4Warn.Text = "Warning: Month + PerPeriod creates approx. $spanMonths filegroups/files for this time span - significantly more operational overhead than 'Single'. Consider 'Single' or a coarser granularity."
                     return
                 }
             }
@@ -516,9 +516,9 @@
     $grid5 = New-Object System.Windows.Forms.DataGridView
     & $styleGrid $grid5
     foreach ($c in @(
-            @{ N = 'Periode'; H = 'Periode'; W = 100 }
-            @{ N = 'Boundary'; H = 'Boundary-Wert'; W = 150 }
-            @{ N = 'Zukunft'; H = 'Zukunfts-Puffer'; W = 100 }
+            @{ N = 'Periode'; H = 'Period'; W = 100 }
+            @{ N = 'Boundary'; H = 'Boundary Value'; W = 150 }
+            @{ N = 'Zukunft'; H = 'Future Buffer'; W = 100 }
         ))
     {
         $col = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
@@ -544,11 +544,11 @@
             $script:wiz.Boundaries = $boundaries
             foreach ($b in $boundaries)
             {
-                $grid5.Rows.Add($b.PeriodLabel, (_FormatDisplayValue $b.BoundaryValue), $(if ($b.IsFutureBuffer) { 'Ja' } else { '' })) | Out-Null
+                $grid5.Rows.Add($b.PeriodLabel, (_FormatDisplayValue $b.BoundaryValue), $(if ($b.IsFutureBuffer) { 'Yes' } else { '' })) | Out-Null
             }
-            Set-Status "$($boundaries.Count) Boundary-Wert(e) -> $($boundaries.Count + 1) Partition(en)." 'OK'
+            Set-Status "$($boundaries.Count) boundary value(s) -> $($boundaries.Count + 1) partition(s)." 'OK'
         }
-        catch { Set-Status "Fehler: $($_.Exception.Message)" 'Error' }
+        catch { Set-Status "Error: $($_.Exception.Message)" 'Error' }
     }
 
     # ===================================================================================
@@ -559,13 +559,13 @@
     $p6.BackColor = $cPanel
 
     $chk6Retention = New-Object System.Windows.Forms.CheckBox
-    $chk6Retention.Text = 'Automatische Wartung (Sliding-Window-Erweiterung + Retention) einrichten'
+    $chk6Retention.Text = 'Set up automatic maintenance (sliding-window extension + retention)'
     $chk6Retention.Location = New-Object System.Drawing.Point(4, 8)
     $chk6Retention.AutoSize = $true
     $chk6Retention.ForeColor = $cText
 
     $lbl6a = New-Object System.Windows.Forms.Label
-    $lbl6a.Text = 'Aufbewahrung:'
+    $lbl6a.Text = 'Retention:'
     $lbl6a.Location = New-Object System.Drawing.Point(24, 44)
     $lbl6a.AutoSize = $true
     $lbl6a.ForeColor = $cDim
@@ -588,13 +588,13 @@
     $cmb6Unit.SelectedIndex = 0
 
     $chk6Archive = New-Object System.Windows.Forms.CheckBox
-    $chk6Archive.Text = 'Vor dem Entfernen in eine Archiv-Datenbank kopieren (gleiche Instanz)'
+    $chk6Archive.Text = 'Copy to an archive database before removal (same instance)'
     $chk6Archive.Location = New-Object System.Drawing.Point(24, 76)
     $chk6Archive.AutoSize = $true
     $chk6Archive.ForeColor = $cText
 
     $lbl6b = New-Object System.Windows.Forms.Label
-    $lbl6b.Text = 'Archiv-Datenbank:'
+    $lbl6b.Text = 'Archive Database:'
     $lbl6b.Location = New-Object System.Drawing.Point(44, 108)
     $lbl6b.AutoSize = $true
     $lbl6b.ForeColor = $cDim
@@ -641,7 +641,7 @@
     $txt7Summary.Font = New-Object System.Drawing.Font('Consolas', 9)
 
     $btn7Execute = New-Object System.Windows.Forms.Button
-    $btn7Execute.Text = 'Jetzt ausfuehren'
+    $btn7Execute.Text = 'Execute Now'
     $btn7Execute.Location = New-Object System.Drawing.Point(0, 232)
     $btn7Execute.Size = New-Object System.Drawing.Size(160, 32)
     & $styleButton $btn7Execute
@@ -672,32 +672,32 @@
     function Load-Step7
     {
         $lines = [System.Collections.Generic.List[string]]::new()
-        $lines.Add("Instanz             : $($script:wiz.SqlInstance)")
-        $lines.Add("Datenbank           : $($script:wiz.Database)")
-        $lines.Add("Tabelle             : $($script:wiz.SchemaName).$($script:wiz.TableName) ($(if ($script:wiz.IsHeap) { 'Heap' } else { 'Clustered' }))")
-        $lines.Add("Partitionsspalte    : $($script:wiz.PartitionColumn) ($($script:wiz.DataType))")
-        $lines.Add("Granularitaet       : $($script:wiz.Granularity) | BoundaryType: $($script:wiz.BoundaryType)")
-        $lines.Add("Filegroup-Strategie : $($script:wiz.FilegroupStrategy) | Zukunfts-Puffer: $($script:wiz.FutureBufferPeriods) Periode(n)")
-        $lines.Add("Partitionen         : $($script:wiz.Boundaries.Count + 1) ($($script:wiz.Boundaries.Count) Boundary-Werte)")
+        $lines.Add("Instance             : $($script:wiz.SqlInstance)")
+        $lines.Add("Database             : $($script:wiz.Database)")
+        $lines.Add("Table                : $($script:wiz.SchemaName).$($script:wiz.TableName) ($(if ($script:wiz.IsHeap) { 'Heap' } else { 'Clustered' }))")
+        $lines.Add("Partition Column     : $($script:wiz.PartitionColumn) ($($script:wiz.DataType))")
+        $lines.Add("Granularity          : $($script:wiz.Granularity) | BoundaryType: $($script:wiz.BoundaryType)")
+        $lines.Add("Filegroup Strategy   : $($script:wiz.FilegroupStrategy) | Future Buffer: $($script:wiz.FutureBufferPeriods) period(s)")
+        $lines.Add("Partitions           : $($script:wiz.Boundaries.Count + 1) ($($script:wiz.Boundaries.Count) boundary value(s))")
         if ($chk6Retention.Checked)
         {
-            $lines.Add("Automat. Wartung    : Ja - Aufbewahrung $($num6Retention.Value) $($cmb6Unit.SelectedItem)")
-            if ($chk6Archive.Checked) { $lines.Add("Archivierung        : Ja -> '$($txt6ArchiveDb.Text.Trim())'") }
-            else { $lines.Add('Archivierung        : Nein (nur Loeschen)') }
+            $lines.Add("Automated Maintenance: Yes - Retention $($num6Retention.Value) $($cmb6Unit.SelectedItem)")
+            if ($chk6Archive.Checked) { $lines.Add("Archiving            : Yes -> '$($txt6ArchiveDb.Text.Trim())'") }
+            else { $lines.Add('Archiving            : No (delete only)') }
         }
-        else { $lines.Add('Automat. Wartung    : Nein (nur einmalige Konvertierung)') }
+        else { $lines.Add('Automated Maintenance: No (one-time conversion only)') }
         $txt7Summary.Text = $lines -join "`r`n"
     }
 
     $btn7Execute.Add_Click({
         $confirm = [System.Windows.Forms.MessageBox]::Show(
-            "'$($script:wiz.SchemaName).$($script:wiz.TableName)' jetzt partitionieren?`n`nDieser Vorgang aendert die Tabellenstruktur (Index-Rebuild).",
-            'Partitionierung bestaetigen', 'YesNo', 'Warning')
+            "Partition '$($script:wiz.SchemaName).$($script:wiz.TableName)' now?`n`nThis operation changes the table structure (index rebuild).",
+            'Confirm Partitioning', 'YesNo', 'Warning')
         if ($confirm -ne 'Yes') { return }
 
         $btn7Execute.Enabled = $false
         $btnBack.Enabled = $false
-        Add-Log "Starte Konvertierung von '$($script:wiz.SchemaName).$($script:wiz.TableName)' ..."
+        Add-Log "Starting conversion of '$($script:wiz.SchemaName).$($script:wiz.TableName)' ..."
         try
         {
             $cp = $script:connParams
@@ -722,11 +722,11 @@
                 if ($txt3End.Text.Trim()) { $convParams['ManualEndValue'] = $txt3End.Text.Trim() }
             }
             $result = Invoke-sqmTablePartitionConversion @cp @convParams
-            Add-Log "Konvertierung abgeschlossen: $($result.PartitionCount) Partition(en), Status $($result.Status)."
+            Add-Log "Conversion completed: $($result.PartitionCount) partition(s), status $($result.Status)."
 
             if ($chk6Retention.Checked)
             {
-                Add-Log 'Registriere Tabelle fuer automatische Wartung ...'
+                Add-Log 'Registering table for automated maintenance ...'
                 $regParams = @{
                     SqlInstance           = $script:wiz.SqlInstance
                     Database              = $script:wiz.Database
@@ -749,16 +749,16 @@
                     $regParams['ArchiveDatabaseName'] = $txt6ArchiveDb.Text.Trim()
                 }
                 Register-sqmPartitionTable @cp @regParams | Out-Null
-                Add-Log 'Registrierung abgeschlossen. Wartungs-Jobs (New-sqmPartitionExtendJob / New-sqmPartitionRetentionJob) muessen einmalig separat eingerichtet werden, falls noch nicht vorhanden.'
+                Add-Log 'Registration completed. Maintenance jobs (New-sqmPartitionExtendJob / New-sqmPartitionRetentionJob) must be set up separately once, if not already in place.'
             }
 
-            Add-Log 'FERTIG.'
-            [System.Windows.Forms.MessageBox]::Show("'$($script:wiz.SchemaName).$($script:wiz.TableName)' wurde erfolgreich partitioniert.", 'Erfolg', 'OK', 'Information') | Out-Null
+            Add-Log 'DONE.'
+            [System.Windows.Forms.MessageBox]::Show("'$($script:wiz.SchemaName).$($script:wiz.TableName)' was partitioned successfully.", 'Success', 'OK', 'Information') | Out-Null
         }
         catch
         {
-            Add-Log "FEHLER: $($_.Exception.Message)"
-            [System.Windows.Forms.MessageBox]::Show("Fehler bei der Konvertierung:`n$($_.Exception.Message)", 'Fehler', 'OK', 'Error') | Out-Null
+            Add-Log "ERROR: $($_.Exception.Message)"
+            [System.Windows.Forms.MessageBox]::Show("Error during conversion:`n$($_.Exception.Message)", 'Error', 'OK', 'Error') | Out-Null
             $btnBack.Enabled = $true
             $btn7Execute.Enabled = $true
         }
@@ -775,7 +775,7 @@
         $panels[$Index].Visible = $true
         $lblStep.Text = $stepTitles[$Index]
         $btnBack.Enabled = ($Index -gt 0)
-        $btnNext.Text = if ($Index -eq 7) { 'Fertig' } else { 'Weiter >' }
+        $btnNext.Text = if ($Index -eq 7) { 'Finish' } else { 'Next >' }
         # KEIN Set-Status '' hier: Confirm-StepAndAdvance ruft VOR Show-Step die passende
         # Load-StepN-Funktion auf, die eine aussagekraeftige Statusmeldung setzt (z.B. "X
         # Tabelle(n) gefunden." oder eine Fehlermeldung) - ein Clear hier wuerde diese
@@ -790,7 +790,7 @@
             0 {
                 if ([string]::IsNullOrWhiteSpace($txt0Instance.Text) -or -not $cmb0Database.SelectedItem)
                 {
-                    Set-Status 'Bitte Instanz eingeben und "Verbinden" klicken, dann eine Datenbank auswaehlen.' 'Warn'
+                    Set-Status 'Please enter an instance and click "Connect", then select a database.' 'Warn'
                     return $false
                 }
                 $script:wiz.SqlInstance = $txt0Instance.Text.Trim()
@@ -799,11 +799,11 @@
                 return $true
             }
             1 {
-                if ($grid1.SelectedRows.Count -eq 0) { Set-Status 'Bitte eine Tabelle auswaehlen.' 'Warn'; return $false }
+                if ($grid1.SelectedRows.Count -eq 0) { Set-Status 'Please select a table.' 'Warn'; return $false }
                 $r = $grid1.SelectedRows[0]
-                if ($r.Cells['Status'].Value -eq 'bereits partitioniert')
+                if ($r.Cells['Status'].Value -eq 'already partitioned')
                 {
-                    Set-Status 'Diese Tabelle ist bereits partitioniert - bitte eine andere waehlen.' 'Warn'; return $false
+                    Set-Status 'This table is already partitioned - please select another one.' 'Warn'; return $false
                 }
                 $script:wiz.SchemaName = $r.Cells['Schema'].Value
                 $script:wiz.TableName = $r.Cells['Tabelle'].Value
@@ -812,9 +812,9 @@
                 return $true
             }
             2 {
-                if ($grid2.SelectedRows.Count -eq 0) { Set-Status 'Bitte eine Spalte auswaehlen.' 'Warn'; return $false }
+                if ($grid2.SelectedRows.Count -eq 0) { Set-Status 'Please select a column.' 'Warn'; return $false }
                 $r = $grid2.SelectedRows[0]
-                if ($r.Cells['Kompatibel'].Value -ne 'Ja') { Set-Status 'Dieser Datentyp ist fuer Partition Functions nicht zulaessig.' 'Warn'; return $false }
+                if ($r.Cells['Kompatibel'].Value -ne 'Yes') { Set-Status 'This data type is not allowed for partition functions.' 'Warn'; return $false }
                 $script:wiz.PartitionColumn = $r.Cells['Spalte'].Value
                 $script:wiz.DataType = $r.Cells['Typ'].Value
                 Load-Step3
@@ -823,7 +823,7 @@
             3 {
                 if ($script:wiz.IsEmpty -and [string]::IsNullOrWhiteSpace($txt3Start.Text))
                 {
-                    Set-Status 'Bitte einen manuellen Startwert angeben.' 'Warn'; return $false
+                    Set-Status 'Please enter a manual start value.' 'Warn'; return $false
                 }
                 if ($script:wiz.SuggestedGranularity) { $cmb4Gran.SelectedItem = $script:wiz.SuggestedGranularity }
                 elseif (-not $cmb4Gran.SelectedItem) { $cmb4Gran.SelectedIndex = 0 }

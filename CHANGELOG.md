@@ -1,5 +1,23 @@
 # sqmPartitionTool — Changelog
 
+## [1.3.0.0] — 2026-07-03
+
+### GUI auf Englisch umgestellt
+
+- **`Show-sqmPartitionToolGui`**: Alle sichtbaren GUI-Texte (Schritt-Titel, Fenstertitel,
+  Feldbeschriftungen, Buttons, Grid-Spaltenkoepfe, Statusmeldungen, Bestaetigungs-/Fehler-Dialoge)
+  von Deutsch auf Englisch umgestellt - der fruehere "de-DE statt en-US"-Fix (1.2.1.0) betraf nur
+  Zahlen-/Datumsformatierung, nicht die eigentliche GUI-Sprache. Code-Kommentare und
+  `Invoke-sqmLogging`-Meldungen bleiben bewusst Deutsch (konsistent mit dem restlichen Projekt -
+  nur die sichtbare Oberflaeche wurde umgestellt).
+- Interne Spalten-`Name`-Bezeichner (fuer `$row.Cells['...']`-Zugriffe im Code) unveraendert
+  gelassen, nur die angezeigten `HeaderText`-Werte uebersetzt - keine Logik-Aenderung noetig.
+  Zellwerte, die als Vergleichswerte im Code verwendet werden (z.B. Status "already partitioned"
+  statt "bereits partitioniert", Kompatibel-Spalte "Yes" statt "Ja"), wurden konsistent an beiden
+  Stellen (Anzeige UND Vergleich) angepasst.
+- Auf DEV02 interaktiv durchgeklickt (Verbindung -> Tabelle waehlen -> Zusammenfassung): alle
+  Texte korrekt Englisch, Dezimalwerte weiterhin mit Punkt (z.B. "0.42" MB).
+
 ## [1.2.1.0] — 2026-07-03
 
 ### Fixes nach weiterem Feedback
