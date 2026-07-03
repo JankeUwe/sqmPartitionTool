@@ -846,6 +846,18 @@
     $form.Controls.Add($pNav)
     $form.Controls.Add($pHead)
 
+    # Von PowerShell aus gestartete WinForms-Fenster erscheinen manchmal minimiert oder hinter
+    # anderen Fenstern (der Prozess erbt den anfaenglichen Show-Command des aufrufenden Fensters
+    # fuer sein erstes GUI-Fenster). Explizit Normal erzwingen und beim ersten Anzeigen kurz
+    # TopMost setzen + aktivieren, um das Fenster zuverlaessig in den Vordergrund zu holen.
+    $form.WindowState = [System.Windows.Forms.FormWindowState]::Normal
+    $form.Add_Shown({
+        $form.WindowState = [System.Windows.Forms.FormWindowState]::Normal
+        $form.TopMost = $true
+        $form.Activate()
+        $form.TopMost = $false
+    })
+
     Show-Step 0
     [void]$form.ShowDialog()
 }
