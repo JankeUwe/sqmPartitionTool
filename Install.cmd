@@ -6,8 +6,9 @@
 :: Automatically re-launches elevated (UAC) when AllUsers scope is requested.
 ::
 :: Usage:
-::   Install.cmd                   -> auto-detect: AllUsers if Admin, CurrentUser otherwise
-::   Install.cmd AllUsers          -> installs system-wide (auto-elevates via UAC if needed)
+::   Install.cmd                   -> default: AllUsers, system-wide (auto-elevates via UAC)
+::                                     so colleagues can just double-click it
+::   Install.cmd AllUsers          -> same as above, explicit
 ::   Install.cmd CurrentUser       -> installs for current user only (no elevation needed)
 ::   Install.cmd AllUsers "D:\Modules\sqmPartitionTool"  -> system-wide, custom path
 
@@ -16,6 +17,14 @@ setlocal EnableDelayedExpansion
 set "SCRIPT_DIR=%~dp0"
 set "SCOPE=%~1"
 set "DESTINATION=%~2"
+
+:: ---------------------------------------------------------------
+:: Kein Scope angegeben (z.B. einfacher Doppelklick) -> immer AllUsers.
+:: Kollegen sollen nur doppelklicken muessen - das muss zuverlaessig
+:: elevaten und systemweit installieren, ohne sich auf ein spaeteres
+:: "bin ich jetzt elevated?"-Auto-Detect in Install.ps1 zu verlassen.
+:: ---------------------------------------------------------------
+if "%SCOPE%"=="" set "SCOPE=AllUsers"
 
 :: ---------------------------------------------------------------
 :: Pruefen ob Script bereits als Administrator laeuft
