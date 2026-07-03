@@ -29,7 +29,9 @@
 .PARAMETER Granularity
     Month, Quarter oder Year.
 .PARAMETER BoundaryType
-    Date oder Int.
+    Date, Int oder Text.
+.PARAMETER SurrogateDateFormat
+    Nur relevant bei BoundaryType Int oder Text: 'yyyyMMdd' (Standard) oder 'yyyyMM'.
 .PARAMETER FilegroupStrategy
     Single oder PerPeriod.
 .PARAMETER FutureBufferPeriods
@@ -92,8 +94,12 @@ function Register-sqmPartitionTable
 		[string]$Granularity,
 
 		[Parameter(Mandatory = $true)]
-		[ValidateSet('Date', 'Int')]
+		[ValidateSet('Date', 'Int', 'Text')]
 		[string]$BoundaryType,
+
+		[Parameter(Mandatory = $false)]
+		[ValidateSet('yyyyMMdd', 'yyyyMM')]
+		[string]$SurrogateDateFormat = 'yyyyMMdd',
 
 		[Parameter(Mandatory = $false)]
 		[ValidateSet('Single', 'PerPeriod')]
@@ -152,6 +158,7 @@ function Register-sqmPartitionTable
 	$retUnitSql = if ($RetentionUnit) { "N'$RetentionUnit'" } else { 'NULL' }
 	$archDbSql = if ($ArchiveDatabaseName) { "N'$ArchiveDatabaseName'" } else { 'NULL' }
 	$archSchemaSql = if ($ArchiveEnabled) { "N'$ArchiveSchemaName'" } else { 'NULL' }
+	$surrFmtSql = if ($BoundaryType -eq 'Date') { 'NULL' } else { "N'$SurrogateDateFormat'" }
 
 	$mergeSql = @"
 MERGE master.dbo.sqm_PartitionRegistry AS tgt
@@ -163,6 +170,7 @@ WHEN MATCHED THEN UPDATE SET
     PartitionSchemeName = N'$PartitionSchemeName',
     Granularity = N'$Granularity',
     BoundaryType = N'$BoundaryType',
+    SurrogateDateFormat = $surrFmtSql,
     FilegroupStrategy = N'$FilegroupStrategy',
     FutureBufferPeriods = $FutureBufferPeriods,
     RetentionValue = $retValSql,
@@ -173,11 +181,11 @@ WHEN MATCHED THEN UPDATE SET
     IsActive = $([int]$IsActive)
 WHEN NOT MATCHED THEN INSERT
     (DatabaseName, SchemaName, TableName, PartitionColumn, PartitionFunctionName, PartitionSchemeName,
-     Granularity, BoundaryType, FilegroupStrategy, FutureBufferPeriods, RetentionValue, RetentionUnit,
+     Granularity, BoundaryType, SurrogateDateFormat, FilegroupStrategy, FutureBufferPeriods, RetentionValue, RetentionUnit,
      ArchiveEnabled, ArchiveDatabaseName, ArchiveSchemaName, IsActive)
 VALUES
     (N'$Database', N'$Schema', N'$Table', N'$PartitionColumn', N'$PartitionFunctionName', N'$PartitionSchemeName',
-     N'$Granularity', N'$BoundaryType', N'$FilegroupStrategy', $FutureBufferPeriods, $retValSql, $retUnitSql,
+     N'$Granularity', N'$BoundaryType', $surrFmtSql, N'$FilegroupStrategy', $FutureBufferPeriods, $retValSql, $retUnitSql,
      $([int][bool]$ArchiveEnabled), $archDbSql, $archSchemaSql, $([int]$IsActive));
 "@
 

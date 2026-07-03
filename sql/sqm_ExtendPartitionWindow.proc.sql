@@ -33,7 +33,7 @@ BEGIN
 
     DECLARE @RegistryId INT, @DatabaseName SYSNAME, @TableName SYSNAME,
             @PartitionFunctionName SYSNAME, @PartitionSchemeName SYSNAME,
-            @Granularity VARCHAR(10), @BoundaryType VARCHAR(10),
+            @Granularity VARCHAR(10), @BoundaryType VARCHAR(10), @SurrogateDateFormat VARCHAR(10),
             @FilegroupStrategy VARCHAR(10), @FutureBufferPeriods INT;
 
     DECLARE @ProcessedCount INT = 0, @ExtendedCount INT = 0, @SkippedCount INT = 0,
@@ -41,13 +41,13 @@ BEGIN
 
     DECLARE reg_cursor CURSOR LOCAL FAST_FORWARD FOR
         SELECT RegistryId, DatabaseName, TableName, PartitionFunctionName, PartitionSchemeName,
-               Granularity, BoundaryType, FilegroupStrategy, FutureBufferPeriods
+               Granularity, BoundaryType, ISNULL(SurrogateDateFormat, N'yyyyMMdd'), FilegroupStrategy, FutureBufferPeriods
         FROM master.dbo.sqm_PartitionRegistry
         WHERE IsActive = 1;
 
     OPEN reg_cursor;
     FETCH NEXT FROM reg_cursor INTO @RegistryId, @DatabaseName, @TableName, @PartitionFunctionName,
-        @PartitionSchemeName, @Granularity, @BoundaryType, @FilegroupStrategy, @FutureBufferPeriods;
+        @PartitionSchemeName, @Granularity, @BoundaryType, @SurrogateDateFormat, @FilegroupStrategy, @FutureBufferPeriods;
 
     WHILE @@FETCH_STATUS = 0
     BEGIN
@@ -83,10 +83,22 @@ END
 DECLARE @MaxBoundaryDate DATE, @CurrentPeriod DATE, @NextPeriod DATE, @TargetPeriod DATE;
 DECLARE @Today DATE = CAST(GETDATE() AS DATE);
 
-IF @pBoundaryType = ''Int''
-    SET @MaxBoundaryDate = CONVERT(DATE, CONVERT(VARCHAR(8), CAST(@MaxBoundary AS INT)), 112);
-ELSE
+-- BoundaryType Int/Text: Surrogatschluessel als String (''20240115'' oder ''202401'', je nach
+-- @pSurrogateDateFormat) - dieselbe Unterscheidung wie beim Generieren der Boundary-Literale weiter
+-- unten. BoundaryType Date: @MaxBoundary ist bereits ein echter Datumswert.
+IF @pBoundaryType = ''Date''
     SET @MaxBoundaryDate = CAST(@MaxBoundary AS DATE);
+ELSE
+BEGIN
+    DECLARE @MaxBoundaryStr VARCHAR(10) = CASE WHEN @pBoundaryType = ''Int''
+        THEN CONVERT(VARCHAR(10), CAST(@MaxBoundary AS BIGINT))
+        ELSE CAST(@MaxBoundary AS VARCHAR(10)) END;
+
+    IF @pSurrogateDateFormat = ''yyyyMM''
+        SET @MaxBoundaryDate = DATEFROMPARTS(CAST(LEFT(@MaxBoundaryStr, 4) AS INT), CAST(RIGHT(@MaxBoundaryStr, 2) AS INT), 1);
+    ELSE
+        SET @MaxBoundaryDate = CONVERT(DATE, @MaxBoundaryStr, 112);
+END
 
 IF @pGranularity = ''Month''
     SET @CurrentPeriod = DATEFROMPARTS(YEAR(@Today), MONTH(@Today), 1);
@@ -112,13 +124,23 @@ ELSE IF @pGranularity = ''Quarter''
 ELSE
     SET @TargetPeriod = DATEADD(YEAR, @pFutureBufferPeriods, @CurrentPeriod);
 
-DECLARE @BoundaryLiteral NVARCHAR(50), @StepSql NVARCHAR(MAX);
+DECLARE @BoundaryLiteral NVARCHAR(50), @StepSql NVARCHAR(MAX), @NextPeriodStr VARCHAR(8);
 WHILE @NextPeriod < @TargetPeriod
 BEGIN
-    IF @pBoundaryType = ''Int''
-        SET @BoundaryLiteral = CONVERT(VARCHAR(8), @NextPeriod, 112);
-    ELSE
+    IF @pBoundaryType = ''Date''
         SET @BoundaryLiteral = QUOTENAME(CONVERT(VARCHAR(10), @NextPeriod, 120), N'''''''');
+    ELSE
+    BEGIN
+        -- Surrogatschluessel-String im konfigurierten Format erzeugen (yyyyMM hat keinen
+        -- passenden CONVERT-Style - manuell aus Jahr/Monat zusammensetzen).
+        SET @NextPeriodStr = CASE WHEN @pSurrogateDateFormat = ''yyyyMM''
+            THEN CONVERT(VARCHAR(4), YEAR(@NextPeriod)) + RIGHT(''0'' + CONVERT(VARCHAR(2), MONTH(@NextPeriod)), 2)
+            ELSE CONVERT(VARCHAR(8), @NextPeriod, 112) END;
+
+        SET @BoundaryLiteral = CASE WHEN @pBoundaryType = ''Text''
+            THEN QUOTENAME(@NextPeriodStr, N'''''''')
+            ELSE @NextPeriodStr END;
+    END
 
     -- EXEC() akzeptiert bei einem parenthesierten Argument keinen Ausdruck, der QUOTENAME()
     -- direkt per String-Verkettung einbindet (empirisch verifiziert - Syntaxfehler trotz
@@ -140,9 +162,9 @@ END
 ';
             DECLARE @extendedThisTable INT = 0;
             EXEC sp_executesql @innerSql,
-                N'@pPfName SYSNAME, @pPsName SYSNAME, @pFgName SYSNAME, @pGranularity VARCHAR(10), @pBoundaryType VARCHAR(10), @pFutureBufferPeriods INT, @pExtendedThisTable INT OUTPUT',
+                N'@pPfName SYSNAME, @pPsName SYSNAME, @pFgName SYSNAME, @pGranularity VARCHAR(10), @pBoundaryType VARCHAR(10), @pSurrogateDateFormat VARCHAR(10), @pFutureBufferPeriods INT, @pExtendedThisTable INT OUTPUT',
                 @pPfName = @PartitionFunctionName, @pPsName = @PartitionSchemeName, @pFgName = @FgName,
-                @pGranularity = @Granularity, @pBoundaryType = @BoundaryType, @pFutureBufferPeriods = @FutureBufferPeriods,
+                @pGranularity = @Granularity, @pBoundaryType = @BoundaryType, @pSurrogateDateFormat = @SurrogateDateFormat, @pFutureBufferPeriods = @FutureBufferPeriods,
                 @pExtendedThisTable = @extendedThisTable OUTPUT;
 
             IF @extendedThisTable > 0
@@ -158,7 +180,7 @@ END
 
         NextTable:
         FETCH NEXT FROM reg_cursor INTO @RegistryId, @DatabaseName, @TableName, @PartitionFunctionName,
-            @PartitionSchemeName, @Granularity, @BoundaryType, @FilegroupStrategy, @FutureBufferPeriods;
+            @PartitionSchemeName, @Granularity, @BoundaryType, @SurrogateDateFormat, @FilegroupStrategy, @FutureBufferPeriods;
     END
 
     CLOSE reg_cursor;

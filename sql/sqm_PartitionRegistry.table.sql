@@ -23,8 +23,11 @@ BEGIN
         PartitionSchemeName     SYSNAME       NOT NULL,
         -- Month | Quarter | Year
         Granularity             VARCHAR(10)   NOT NULL,
-        -- Date  (echte date/datetime2-Spalte) | Int (Surrogatschluessel wie YYYYMMDD)
+        -- Date (echte date/datetime2-Spalte) | Int (numerischer Surrogatschluessel) |
+        -- Text (char/varchar-Surrogatschluessel mit demselben Zahlenformat als String)
         BoundaryType            VARCHAR(10)   NOT NULL,
+        -- Nur relevant bei BoundaryType Int/Text: 'yyyyMMdd' oder 'yyyyMM' - NULL bei BoundaryType Date
+        SurrogateDateFormat     VARCHAR(10)   NULL,
         -- Single (ein gemeinsames Filegroup) | PerPeriod (ein Filegroup je Zeitraum)
         FilegroupStrategy       VARCHAR(10)   NOT NULL,
         -- Wie viele zukuenftige, leere Perioden beim Extend-Job vorgehalten werden
@@ -47,5 +50,18 @@ BEGIN
         LastRetentionRunAt        DATETIME2    NULL,
         CONSTRAINT UQ_sqm_PartitionRegistry_Table UNIQUE (DatabaseName, SchemaName, TableName)
     );
+END
+GO
+
+-- Migrationspfad fuer bereits vor der Text/SurrogateDateFormat-Erweiterung angelegte Tabellen
+-- (z.B. DEV02-Testinstallation) - CREATE TABLE oben greift dort nicht, da die Tabelle schon existiert.
+IF EXISTS (
+    SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'master.dbo.sqm_PartitionRegistry') AND type = 'U'
+)
+AND NOT EXISTS (
+    SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'master.dbo.sqm_PartitionRegistry') AND name = 'SurrogateDateFormat'
+)
+BEGIN
+    ALTER TABLE master.dbo.sqm_PartitionRegistry ADD SurrogateDateFormat VARCHAR(10) NULL;
 END
 GO

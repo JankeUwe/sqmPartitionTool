@@ -112,6 +112,7 @@ SELECT
 	$boundarySql = ($BoundaryList | ForEach-Object {
 			$v = $_.BoundaryValue
 			if ($v -is [datetime]) { "'$($v.ToString('yyyy-MM-dd'))'" }
+			elseif ($v -is [string]) { "N'$($v.Replace("'", "''"))'" }
 			else { "$v" }
 		}) -join ', '
 

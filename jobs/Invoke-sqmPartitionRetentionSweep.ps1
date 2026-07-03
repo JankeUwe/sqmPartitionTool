@@ -81,7 +81,22 @@ foreach ($t in $tables)
             # mehr als einer Partition insgesamt).
             $oldest = $status[0]
             $upperBoundary = $oldest.UpperBoundaryValue
-            if (-not $upperBoundary -or [datetime]$upperBoundary -gt $cutoff) { break }
+            if (-not $upperBoundary) { break }
+
+            # Roher Boundary-Wert ist nur bei BoundaryType='Date' bereits ein echtes Datum - bei
+            # 'Int'/'Text' ist es ein Surrogatschluessel-String/-Zahl (z.B. 20240115 oder '202401'),
+            # der erst gemaess SurrogateDateFormat geparst werden muss (naiver [datetime]-Cast eines
+            # int64-Werts wie 20240115 wuerde als OLE-Automation-Datumsserial fehlinterpretiert).
+            $upperBoundaryDate = if ($t.BoundaryType -eq 'Date')
+            {
+                [datetime]$upperBoundary
+            }
+            else
+            {
+                $fmt = if ($t.SurrogateDateFormat -isnot [System.DBNull] -and $t.SurrogateDateFormat) { [string]$t.SurrogateDateFormat } else { 'yyyyMMdd' }
+                [datetime]::ParseExact([string]$upperBoundary, $fmt, $null)
+            }
+            if ($upperBoundaryDate -gt $cutoff) { break }
 
             $archiveParams['PartitionNumber'] = [int]$oldest.PartitionNumber
             $result = Invoke-sqmPartitionArchive @archiveParams

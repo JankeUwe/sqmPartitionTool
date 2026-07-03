@@ -1,5 +1,47 @@
 # sqmPartitionTool — Changelog
 
+## [1.4.0.0] — 2026-07-03
+
+### Varchar-Surrogatschluessel (BoundaryType 'Text') + konfigurierbares yyyyMM-Format
+
+- Bisher deckte `BoundaryType 'Int'` nur numerische YYYYMMDD-Surrogatschluessel ab. Manche Projekte
+  fuehren dasselbe Datumsformat aber als `char`/`varchar`-Spalte, und/oder nur auf Monatsebene
+  (YYYYMM statt YYYYMMDD). Beides wird jetzt unterstuetzt:
+  - Neuer `BoundaryType`-Wert `'Text'` (zusaetzlich zu `'Date'`/`'Int'`) fuer
+    `char`/`varchar`/`nchar`/`nvarchar`-Surrogatschluessel.
+  - Neuer Parameter `-SurrogateDateFormat` (`'yyyyMMdd'` Standard oder `'yyyyMM'`) fuer
+    `Get-sqmPartitionBoundaryList`, `Invoke-sqmTablePartitionConversion` und
+    `Register-sqmPartitionTable` - steuert, ob der Surrogatschluessel Tages- oder nur
+    Monatsgenauigkeit hat.
+  - `Invoke-sqmTablePartitionConversion` erkennt `BoundaryType` weiterhin automatisch aus dem
+    Spaltentyp, wenn nicht angegeben: Datumstypen -> `Date`, `int`/`bigint`/`smallint`/`tinyint` ->
+    `Int`, `char`/`varchar`/`nchar`/`nvarchar` -> `Text`. Der `SqlDataType`, der in die
+    `CREATE PARTITION FUNCTION`-DDL einfliesst, wird fuer Text-Typen jetzt mit der tatsaechlichen
+    Spaltenlaenge gebildet (z.B. `varchar(6)`), vorher waere ein unlaengenspezifiziertes `varchar`
+    (implizit `varchar(1)`) verwendet worden.
+  - `New-sqmPartitionSchemeSet` quotet `[string]`-Boundary-Werte jetzt als `N'...'`-Literale in der
+    `CREATE PARTITION FUNCTION ... VALUES (...)`-DDL.
+  - `sqm_ExtendPartitionWindow` (T-SQL-Wartungsprozedur): liest `SurrogateDateFormat` jetzt aus der
+    Registry und parst/erzeugt Boundary-Werte format- und typabhaengig (yyyyMM hat keinen passenden
+    `CONVERT`-Style und wird manuell aus Jahr/Monat zusammengesetzt; `Text`-Literale werden gequotet,
+    `Int`-Literale nicht).
+  - `Invoke-sqmPartitionRetentionSweep.ps1` (Retention-Job): der Cutoff-Vergleich castete den rohen
+    Boundary-Wert bisher blind als `[datetime]` - das war fuer `BoundaryType 'Date'` korrekt, fuer
+    `'Int'`/`'Text'` aber ein Fehlcast (ein Wert wie `20240115` als `[datetime]` interpretiert landet
+    als OLE-Automation-Datumsserial, nicht als 15.01.2024). Parst jetzt formatabhaengig ueber
+    `[datetime]::ParseExact`.
+  - `Invoke-sqmPartitionArchive` (`MERGE RANGE`-DDL): `[string]`-Boundary-Werte werden jetzt als
+    `N'...'`-Literal gequotet statt sich auf implizite int->varchar-Konvertierung zu verlassen.
+  - `Show-sqmPartitionToolGui`: Schritt 4 (Granularitaet) zeigt bei Nicht-Datumsspalten zusaetzlich
+    eine `Surrogate Date Format`-Auswahl (`yyyyMMdd`/`yyyyMM`).
+  - `sqm_PartitionRegistry`: neue Spalte `SurrogateDateFormat` (mit `ALTER TABLE ... ADD`-
+    Migrationspfad fuer bereits bestehende Installationen).
+- Auf DEV02 end-to-end verifiziert: je eine Testtabelle mit `varchar(6)`-Spalte (`BoundaryType Text`)
+  und `int`-Spalte (`BoundaryType Int`), beide im `yyyyMM`-Format - vollstaendiger Zyklus
+  Konvertierung -> `sqm_ExtendPartitionWindow` (inkl. Idempotenz-Rerun) -> Retention-Sweep
+  (`Invoke-sqmPartitionRetentionSweep.ps1`) lief in beiden Faellen fehlerfrei durch, Boundary-Werte
+  und retirierte Partitionen wurden stichprobenartig gegen `sys.partition_range_values` geprueft.
+
 ## [1.3.0.0] — 2026-07-03
 
 ### GUI auf Englisch umgestellt
