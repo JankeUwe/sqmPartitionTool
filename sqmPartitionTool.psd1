@@ -11,7 +11,7 @@
 	RootModule             = 'sqmPartitionTool.psm1'
 
 	# Version number of this module.
-	ModuleVersion          = '1.2.0.0'
+	ModuleVersion          = '1.2.1.0'
 
 	# ID used to uniquely identify this module
 	GUID                   = 'dea1027c-a846-4dbe-8d25-6a4416525e06'
@@ -40,7 +40,11 @@
 	ProcessorArchitecture  = 'None'
 
 	# Modules that must be imported into the global environment prior to importing this module
-	RequiredModules        = @('dbatools', 'sqmSQLTool')
+	# sqmSQLTool >= 1.9.2.0: das ist die Version, in der Get-sqmSaLogin exportiert wurde
+	# (New-sqmPartitionExtendJob/-RetentionJob nutzen es). Ohne Versions-Pin laedt PowerShell
+	# klaglos eine aeltere sqmSQLTool-Installation und schlaegt erst spaeter mit einer
+	# verwirrenden "Get-sqmSaLogin nicht erkannt"-Meldung fehl statt gleich beim Import.
+	RequiredModules        = @('dbatools', @{ ModuleName = 'sqmSQLTool'; ModuleVersion = '1.9.2.0' })
 
 	# Assemblies that must be loaded prior to importing this module
 	RequiredAssemblies     = @()

@@ -1,5 +1,25 @@
 # sqmPartitionTool — Changelog
 
+## [1.2.1.0] — 2026-07-03
+
+### Fixes nach weiterem Feedback
+
+- **`sqmSQLTool.psd1` Mindestversion erzwungen**: `RequiredModules` verlangt jetzt explizit
+  `sqmSQLTool >= 1.9.2.0` (die Version, in der `Get-sqmSaLogin` exportiert wurde, das
+  `New-sqmPartitionExtendJob`/`-RetentionJob` benoetigen). Vorher wurde eine aeltere, bereits
+  installierte sqmSQLTool-Version klaglos geladen und der Fehler erst spaeter mit einer
+  verwirrenden "Get-sqmSaLogin nicht erkannt"-Meldung sichtbar (Ursache des zuvor gemeldeten
+  "Schritt 2 zeigt keine Tabellen"-Falls). `Install.ps1` prueft die installierte
+  sqmSQLTool-Version jetzt zusaetzlich explizit und warnt mit klarer Anleitung, falls sie zu alt
+  ist.
+- **Fix `Show-sqmPartitionToolGui`**: `SizeMB` (Dezimalwert) wurde direkt an die
+  Tabellen-Auswahl-Grid uebergeben - .NET rendert `[decimal]`-Werte ohne explizite Formatierung
+  mit dem Dezimaltrennzeichen der Thread-Culture, unter de-DE also mit Komma statt Punkt (z.B.
+  "12,34" statt "12.34"), obwohl die restliche GUI-Anzeige unzweideutig sein sollte.
+  `_FormatDisplayValue` formatiert jetzt auch Dezimalwerte explizit mit `InvariantCulture`, nicht
+  nur Datumswerte wie zuvor. Verifiziert: unter simulierter de-DE-Culture liefert
+  `(12.34).ToString()` weiterhin "12,34", der Fix liefert korrekt "12.34".
+
 ## [1.2.0.0] — 2026-07-03
 
 ### Neue Funktion: `Invoke-sqmTableRelocation`

@@ -120,12 +120,18 @@
     if ($SqlCredential) { $script:connParams['SqlCredential'] = $SqlCredential }
     $script:currentStep = 0
 
-    # Datumswerte werden IMMER mit diesem unzweideutigen, kulturunabhaengigen Format angezeigt
-    # (yyyy-MM-dd) statt dem System-/Session-Culture-abhaengigen Standard-ToString() - sonst kann
-    # z.B. 06/16/2026 (en-US, Monat/Tag) mit einem dd/MM-Format verwechselt werden.
+    # Datums- UND Dezimalwerte werden IMMER mit diesem unzweideutigen, kulturunabhaengigen Format
+    # angezeigt statt dem System-/Session-Culture-abhaengigen Standard-ToString() - sonst kann
+    # z.B. 06/16/2026 (en-US, Monat/Tag) mit einem dd/MM-Format verwechselt werden, oder ein
+    # DataGridView rendert eine [decimal] mit Komma statt Punkt als Dezimaltrennzeichen (de-DE).
+    # Gilt fuer JEDEN Wert, der direkt (nicht per String-Interpolation) an ein WinForms-Control
+    # uebergeben wird - Interpolation in einem PowerShell-String nutzt bereits die Session-Culture
+    # konsistent, aber DataGridView-Zellen und Label.Text-Zuweisungen rufen ToString() der
+    # THREAD-Culture selbst auf.
     function _FormatDisplayValue($value)
     {
         if ($value -is [datetime]) { return $value.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture) }
+        if ($value -is [decimal] -or $value -is [double] -or $value -is [single]) { return $value.ToString('0.##', [System.Globalization.CultureInfo]::InvariantCulture) }
         return $value
     }
     $stepTitles = @(
@@ -304,7 +310,7 @@
             foreach ($t in $tables)
             {
                 $status = if ($t.IsPartitioned) { 'bereits partitioniert' } else { 'Kandidat' }
-                $rowIdx = $grid1.Rows.Add($t.SchemaName, $t.TableName, $t.RowCount, $t.SizeMB, $(if ($t.IsHeap) { 'Heap' } else { 'Clustered' }), $status)
+                $rowIdx = $grid1.Rows.Add($t.SchemaName, $t.TableName, $t.RowCount, (_FormatDisplayValue $t.SizeMB), $(if ($t.IsHeap) { 'Heap' } else { 'Clustered' }), $status)
                 if ($t.IsPartitioned) { $grid1.Rows[$rowIdx].DefaultCellStyle.ForeColor = $cDim }
             }
             Set-Status "$($tables.Count) Tabelle(n) gefunden." 'OK'

@@ -146,20 +146,44 @@ if ($Scope -eq 'AllUsers') {
 }
 
 # ---------------------------------------------------------------------------
-# 3b. Abhaengigkeit 'sqmSQLTool' pruefen (KEIN PSGallery-Modul - nur Check+Warnung)
+# 3b. Abhaengigkeit 'sqmSQLTool' pruefen: vorhanden UND aktuell genug.
 #     Muss im GLEICHEN Scope liegen wie die Zielinstallation, sonst findet eine
 #     AllUsers-Session ein nur in CurrentUser installiertes sqmSQLTool nicht.
+#     Versions-Check noetig, weil sqmPartitionTool.psd1 zwar RequiredModules mit
+#     Mindestversion deklariert, ein zu altes sqmSQLTool aber sonst erst beim
+#     Import mit einer wenig hilfreichen Fehlermeldung auffaellt.
 # ---------------------------------------------------------------------------
+$sqlToolMinVersion = [version]'1.9.2.0'
 $auSqlTool = Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules\sqmSQLTool'
 $cuSqlTool = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'WindowsPowerShell\Modules\sqmSQLTool'
-$sqlToolInScope = if ($Scope -eq 'AllUsers') { Test-Path $auSqlTool } else { (Test-Path $cuSqlTool) -or (Test-Path $auSqlTool) }
+$sqlToolPath = if ($Scope -eq 'AllUsers') {
+    if (Test-Path $auSqlTool) { $auSqlTool } else { $null }
+} else {
+    if (Test-Path $cuSqlTool) { $cuSqlTool } elseif (Test-Path $auSqlTool) { $auSqlTool } else { $null }
+}
 
-if (-not $sqlToolInScope) {
+if (-not $sqlToolPath) {
     Write-Warning "sqmSQLTool wurde im Scope '$Scope' nicht gefunden - sqmPartitionTool benoetigt es"
     Write-Warning "zwingend (Logging, WinForms-Theme, SA-Login-Ermittlung) und wird ohne es nicht laden."
     Write-Warning "sqmSQLTool ist nicht auf der PSGallery - bitte zuerst installieren:"
     Write-Warning "  sqmSQLTool\Install.cmd$(if ($Scope -eq 'AllUsers') { ' AllUsers' })"
     Write-Host ""
+} else {
+    try {
+        $sqlToolManifest = Import-PowerShellDataFile -Path (Join-Path $sqlToolPath 'sqmSQLTool.psd1') -ErrorAction Stop
+        $sqlToolVersion = [version]$sqlToolManifest.ModuleVersion
+        if ($sqlToolVersion -lt $sqlToolMinVersion) {
+            Write-Warning "sqmSQLTool ist veraltet: gefunden v$sqlToolVersion, benoetigt >= v$sqlToolMinVersion."
+            Write-Warning "sqmPartitionTool wird sich weigern zu laden (RequiredModules-Versionscheck). Bitte zuerst aktualisieren:"
+            Write-Warning "  git pull   (im sqmSQLTool-Repo)"
+            Write-Warning "  sqmSQLTool\Install.cmd$(if ($Scope -eq 'AllUsers') { ' AllUsers' })"
+            Write-Host ""
+        } else {
+            Write-Host "sqmSQLTool v$sqlToolVersion gefunden (Mindestversion v$sqlToolMinVersion erfuellt)." -ForegroundColor Gray
+        }
+    } catch {
+        Write-Warning "sqmSQLTool-Version konnte nicht gelesen werden ($sqlToolPath): $_"
+    }
 }
 
 # ---------------------------------------------------------------------------
