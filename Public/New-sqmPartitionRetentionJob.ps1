@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Legt den instanzweiten SQL-Agent-Job zur automatischen Partitions-Retention/Archivierung an.
 

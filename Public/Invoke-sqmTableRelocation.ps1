@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Verschiebt eine komplette Tabelle in vertraeglichen Batches in eine andere Datenbank
     (derselben Instanz) und haengt sie am Ende per View unter dem alten Namen wieder ein.

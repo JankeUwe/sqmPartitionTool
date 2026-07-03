@@ -1,4 +1,4 @@
-function Show-sqmPartitionToolGui
+﻿function Show-sqmPartitionToolGui
 {
 <#
 .SYNOPSIS
