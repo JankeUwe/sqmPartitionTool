@@ -770,7 +770,10 @@
         $lblStep.Text = $stepTitles[$Index]
         $btnBack.Enabled = ($Index -gt 0)
         $btnNext.Text = if ($Index -eq 7) { 'Fertig' } else { 'Weiter >' }
-        Set-Status ''
+        # KEIN Set-Status '' hier: Confirm-StepAndAdvance ruft VOR Show-Step die passende
+        # Load-StepN-Funktion auf, die eine aussagekraeftige Statusmeldung setzt (z.B. "X
+        # Tabelle(n) gefunden." oder eine Fehlermeldung) - ein Clear hier wuerde diese
+        # Meldung sofort wieder loeschen, bevor der Anwender sie je sieht.
     }
 
     # ----- Validierung + Datenuebernahme pro Schritt vor dem Weiterschalten --------------
@@ -836,7 +839,7 @@
         }
     })
     $btnBack.Add_Click({
-        if ($script:currentStep -gt 0) { $script:currentStep--; Show-Step $script:currentStep }
+        if ($script:currentStep -gt 0) { $script:currentStep--; Show-Step $script:currentStep; Set-Status '' }
     })
     $btnCancel.Add_Click({ $form.Close() })
     $form.Add_KeyDown({ if ($_.KeyCode -eq [System.Windows.Forms.Keys]::Escape) { $form.Close() } })
