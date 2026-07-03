@@ -119,6 +119,15 @@ function Show-sqmPartitionToolGui
     $script:connParams = @{}
     if ($SqlCredential) { $script:connParams['SqlCredential'] = $SqlCredential }
     $script:currentStep = 0
+
+    # Datumswerte werden IMMER mit diesem unzweideutigen, kulturunabhaengigen Format angezeigt
+    # (yyyy-MM-dd) statt dem System-/Session-Culture-abhaengigen Standard-ToString() - sonst kann
+    # z.B. 06/16/2026 (en-US, Monat/Tag) mit einem dd/MM-Format verwechselt werden.
+    function _FormatDisplayValue($value)
+    {
+        if ($value -is [datetime]) { return $value.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture) }
+        return $value
+    }
     $stepTitles = @(
         '1/8 - Verbindung', '2/8 - Tabelle waehlen', '3/8 - Spalte waehlen', '4/8 - Min/Max-Vorschau',
         '5/8 - Granularitaet && Filegroups', '6/8 - Boundary-Vorschau', '7/8 - Archiv && Retention (optional)',
@@ -404,7 +413,7 @@ function Show-sqmPartitionToolGui
             else
             {
                 $lbl3Manual.Visible = $false; $txt3Start.Visible = $false; $txt3End.Visible = $false
-                $lbl3Info.Text = "Zeilen: $($range.RowCount)`r`nMinValue: $($range.MinValue)`r`nMaxValue: $($range.MaxValue)`r`n" +
+                $lbl3Info.Text = "Zeilen: $($range.RowCount)`r`nMinValue: $(_FormatDisplayValue $range.MinValue)`r`nMaxValue: $(_FormatDisplayValue $range.MaxValue)`r`n" +
                     $(if ($range.SuggestedGranularity) { "Vorschlag Granularitaet: $($range.SuggestedGranularity) (bei Schritt 5 anpassbar)" } else { '' })
                 Set-Status 'Min/Max ermittelt.' 'OK'
             }
@@ -529,7 +538,7 @@ function Show-sqmPartitionToolGui
             $script:wiz.Boundaries = $boundaries
             foreach ($b in $boundaries)
             {
-                $grid5.Rows.Add($b.PeriodLabel, $b.BoundaryValue, $(if ($b.IsFutureBuffer) { 'Ja' } else { '' })) | Out-Null
+                $grid5.Rows.Add($b.PeriodLabel, (_FormatDisplayValue $b.BoundaryValue), $(if ($b.IsFutureBuffer) { 'Ja' } else { '' })) | Out-Null
             }
             Set-Status "$($boundaries.Count) Boundary-Wert(e) -> $($boundaries.Count + 1) Partition(en)." 'OK'
         }

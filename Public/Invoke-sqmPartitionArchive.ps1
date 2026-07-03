@@ -37,7 +37,10 @@
 .PARAMETER ArchiveSchemaName
     Zielschema in der Archiv-Datenbank. Standard: gleiches Schema wie die Quelltabelle.
 .PARAMETER ArchiveBatchSize
-    Batchgroesse fuer die Kopie in die Archiv-Datenbank. Standard: 50000.
+    Batchgroesse fuer die Kopie in die Archiv-Datenbank. Standard: 50000. Enthaelt die Partition
+    mehr Zeilen als dieser Wert, wird in mehreren Batches (je eine eigene Transaktion) statt in
+    einer einzelnen INSERT...SELECT kopiert - vermeidet Transaktionslog-Wachstum und lange
+    Sperren bei sehr grossen Partitionen.
 .PARAMETER SqlCredential
     Optionales PSCredential.
 .PARAMETER EnableException
@@ -248,11 +251,10 @@ ORDER BY ic.is_included_column, ic.key_ordinal, ic.index_column_id
 				Invoke-sqmLogging -Message "Archiv-Tabelle '$ArchiveDatabaseName.$ArchiveSchemaName.$Table' angelegt." -FunctionName $functionName -Level "INFO"
 			}
 
-			# v1: eine INSERT...SELECT-Kopie (die Staging-Tabelle enthaelt nur die eine Partition,
-			# ArchiveBatchSize ist fuer diese Groessenordnung nicht kritisch). Staging-Tabelle wird
-			# NICHT vor dem Zeilenzahl-Abgleich geleert (Schritt 6 uebernimmt das erst danach), damit
-			# bei einem Kopierfehler nichts verloren geht. Vorher/Nachher-Differenz statt absoluter
-			# Zeilenzahl, damit bereits vorhandene Archiv-Daten aus frueheren Laeufen nicht mitzaehlen.
+			# Staging-Tabelle wird NICHT vor dem Zeilenzahl-Abgleich geleert (Schritt 6 uebernimmt das
+			# erst danach), damit bei einem Kopierfehler nichts verloren geht. Vorher/Nachher-Differenz
+			# statt absoluter Zeilenzahl, damit bereits vorhandene Archiv-Daten aus frueheren Laeufen
+			# nicht mitzaehlen.
 			$archCountBefore = [int64](Invoke-DbaQuery @connParams -Query "SELECT COUNT(*) AS Cnt FROM [$ArchiveDatabaseName].[$ArchiveSchemaName].[$Table]" -ErrorAction Stop -EnableException).Cnt
 
 			# Hat die Quelltabelle eine IDENTITY-Spalte, uebernimmt SELECT INTO diese Eigenschaft auch
@@ -261,15 +263,36 @@ ORDER BY ic.is_included_column, ic.key_ordinal, ic.index_column_id
 			# wird.
 			$hasIdentityCol = [bool]($colDefs | Where-Object { [bool]$_.is_identity })
 			$archColList = ($colDefs | ForEach-Object { "[$($_.ColumnName)]" }) -join ', '
+			$archColListDeleted = ($colDefs | ForEach-Object { "DELETED.[$($_.ColumnName)]" }) -join ', '
+
+			# Bei sehr grossen Partitionen wuerde eine einzelne INSERT...SELECT alle Zeilen in EINER
+			# Transaktion kopieren (Transaktionslog-Wachstum, lange Sperren, Timeout-Risiko). Ab
+			# ArchiveBatchSize Zeilen wird stattdessen in Batches per DELETE TOP(@BatchSize) ... OUTPUT
+			# INTO kopiert (jeder Batch = eigene Transaktion) - unkritisch, dass dabei die
+			# Staging-Tabelle bereits waehrenddessen geleert wird, sie wird ohnehin direkt danach
+			# TRUNCATE/DROP.
+			$copyBody = if ($rowsToMove -gt $ArchiveBatchSize)
+			{
+				"DECLARE @RowsAffected INT = 1; " +
+				"WHILE @RowsAffected > 0 " +
+				"BEGIN " +
+				"DELETE TOP ($ArchiveBatchSize) FROM [$Schema].[$stagingTable] " +
+				"OUTPUT $archColListDeleted INTO [$ArchiveDatabaseName].[$ArchiveSchemaName].[$Table] ($archColList); " +
+				"SET @RowsAffected = @@ROWCOUNT; " +
+				"END"
+			}
+			else
+			{
+				"INSERT INTO [$ArchiveDatabaseName].[$ArchiveSchemaName].[$Table] ($archColList) SELECT $archColList FROM [$Schema].[$stagingTable];"
+			}
 			$insertSql = if ($hasIdentityCol)
 			{
-				"SET IDENTITY_INSERT [$ArchiveDatabaseName].[$ArchiveSchemaName].[$Table] ON; " +
-				"INSERT INTO [$ArchiveDatabaseName].[$ArchiveSchemaName].[$Table] ($archColList) SELECT $archColList FROM [$Schema].[$stagingTable]; " +
+				"SET IDENTITY_INSERT [$ArchiveDatabaseName].[$ArchiveSchemaName].[$Table] ON; $copyBody " +
 				"SET IDENTITY_INSERT [$ArchiveDatabaseName].[$ArchiveSchemaName].[$Table] OFF;"
 			}
 			else
 			{
-				"INSERT INTO [$ArchiveDatabaseName].[$ArchiveSchemaName].[$Table] SELECT * FROM [$Schema].[$stagingTable];"
+				$copyBody
 			}
 			Invoke-DbaQuery @connParams -Query $insertSql -ErrorAction Stop -EnableException
 			$archCountAfter = [int64](Invoke-DbaQuery @connParams -Query "SELECT COUNT(*) AS Cnt FROM [$ArchiveDatabaseName].[$ArchiveSchemaName].[$Table]" -ErrorAction Stop -EnableException).Cnt

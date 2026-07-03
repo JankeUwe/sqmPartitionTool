@@ -1,5 +1,52 @@
 # sqmPartitionTool — Changelog
 
+## [1.2.0.0] — 2026-07-03
+
+### Neue Funktion: `Invoke-sqmTableRelocation`
+
+Ergaenzung nach Feedback zur bestehenden Archiv-Funktionalitaet: `Invoke-sqmPartitionArchive`
+verschiebt fortlaufend nur ABGELAUFENE PARTITIONEN einer weiterhin aktiven, partitionierten
+Tabelle. Fuer die einmalige, vollstaendige Auslagerung einer kompletten (typischerweise sehr
+grossen) Tabelle in eine separate Datenbank gibt es jetzt `Invoke-sqmTableRelocation`:
+
+- Batchweise, NICHT-destruktive Kopie (Quelltabelle bleibt bis zum Abschluss vollstaendig
+  unveraendert bestehen, jeder Batch eine eigene kleine Transaktion - Transaktionslog waechst
+  nicht unkontrolliert).
+- Fortsetzbar/resumable: liest bei jedem Aufruf den tatsaechlichen Fortschritt (MAX der
+  Schluesselspalte im Ziel) und macht dort weiter - `-MaxDurationMinutes` erlaubt die gezielte
+  Aufteilung sehr grosser Tabellen auf mehrere Wartungsfenster.
+- Cutover erst nach vollstaendigem, verifiziertem Zeilenzahl-Abgleich: Original-Tabelle wird
+  umbenannt (Sicherheitsnetz, bleibt vollstaendig erhalten), danach ein View mit dem
+  urspruenglichen Tabellennamen angelegt, der per Cross-DB-Query auf die Zieltabelle zeigt -
+  bestehende Abfragen/Reports laufen unveraendert weiter.
+- Auf DEV02 verifiziert: 275 Zeilen in Batches von 100 verschoben, View liefert transparent
+  dieselben Daten, umbenannte Original-Tabelle bleibt vollstaendig unangetastet (275 Zeilen).
+- Zwei Bugs waehrend der Tests gefunden und behoben: (1) `MAX()` ueber eine leere Zieltabelle
+  liefert `[System.DBNull]::Value`, nicht PowerShells `$null` - ohne Sonderbehandlung entstand
+  eine leere, syntaktisch ungueltige `WHERE`-Klausel (`WHERE [Id] > `). (2) Einzeiliges
+  `Invoke-DbaQuery`-Ergebnis ist ein einzelnes `System.Data.DataRow`-Objekt statt eines Arrays -
+  `$result[0]` ruft dann DataRows EIGENEN Spalten-Indexer auf (liefert den Wert der ersten Spalte
+  statt des Objekts selbst); `.ColumnName` darauf lieferte lautlos `$null` statt eines Fehlers.
+  Fix: Ergebnis explizit mit `@(...)` in Array-Kontext zwingen vor dem Indizieren.
+
+## [1.1.1.0] — 2026-07-03
+
+### Feedback nach GUI-Review umgesetzt
+
+- **Fix `Show-sqmPartitionToolGui`**: Datumswerte (Min/Max-Vorschau, Boundary-Vorschau) wurden mit
+  dem Standard-`ToString()` angezeigt, dessen Format von der Session-/System-Culture abhaengt
+  (z.B. `06/16/2026` im en-US-Stil vs. `16.06.2026` im de-DE-Stil) - beim Durchklicken dieser
+  Session tatsaechlich einmal falsch gelesen worden (verwechselt mit einem anderen Datum). Neue
+  `_FormatDisplayValue`-Hilfsfunktion zeigt Datumswerte jetzt immer unzweideutig als
+  `yyyy-MM-dd` (invariante Culture) an.
+- **Erweiterung `Invoke-sqmPartitionArchive`**: `-ArchiveBatchSize` war bisher ein
+  wirkungsloser Parameter - die Archiv-Kopie lief immer als einzelne `INSERT...SELECT` in einer
+  Transaktion (Risiko bei sehr grossen Partitionen: Transaktionslog-Wachstum, lange Sperren,
+  Timeouts). Kopiert jetzt in Batches (`DELETE TOP (@BatchSize) ... OUTPUT INTO`, je eine eigene
+  Transaktion), sobald die Partition mehr Zeilen als `-ArchiveBatchSize` enthaelt. Auf DEV02
+  verifiziert (31 Zeilen, ArchiveBatchSize=15 -> 3 Batches, alle Zeilen inkl. IDENTITY-Werte
+  korrekt uebernommen).
+
 ## [1.1.0.0] — 2026-07-03
 
 ### GUI-Wizard gebaut, kritischer Quarter-Boundary-Bug gefunden und behoben
