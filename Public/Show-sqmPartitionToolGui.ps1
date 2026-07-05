@@ -13,8 +13,13 @@
     Granularitaet + Filegroup-Strategie -> Boundary-Vorschau -> Archiv/Retention (optional) ->
     Zusammenfassung + Ausfuehren.
 
-    Fuehrt am Ende Invoke-sqmTablePartitionConversion aus und bietet optional direkt im Anschluss
-    Register-sqmPartitionTable mit Retention/Archiv-Einstellungen an.
+    Fuehrt am Ende entweder Invoke-sqmTablePartitionConversion aus (In-Place-Partitionierung, optional
+    direkt im Anschluss Register-sqmPartitionTable mit Retention/Archiv-Einstellungen fuer eine
+    SPAETERE automatisierte Auslagerung einzelner Partitionen) - oder, wenn in Schritt 6 "Migrate to
+    archive database now" gewaehlt wurde, Invoke-sqmTableArchiveMigration (sofortige, monatsweise
+    Migration der GESAMTEN Tabelle in eine partitionierte Kopie in der Archiv-Datenbank samt
+    Cutover-View, siehe -CutoverToArchiveView dort). Beide Pfade schliessen sich fuer einen
+    Wizard-Durchlauf gegenseitig aus.
 
 .PARAMETER SqlInstance
     SQL-Instanz, die beim Oeffnen vorbelegt wird.
@@ -243,13 +248,62 @@
     $btn0Connect.Size = New-Object System.Drawing.Size(100, 28)
     & $styleButton $btn0Connect
 
+    # Auth-Modus: Windows Authentication (Standard, ohne SqlCredential) oder SQL Server
+    # Authentication (Login/Passwort -> SqlCredential). Ohne diese Wahl war die GUI bisher NUR per
+    # Windows-Authentifizierung nutzbar - schlaegt fehl sobald keine Domaenen-/Vertrauensstellung
+    # zum Zielrechner besteht (Workgroup) oder wenn dort nur SQL-Logins konfiguriert sind.
+    $rad0Windows = New-Object System.Windows.Forms.RadioButton
+    $rad0Windows.Text = 'Windows Authentication'
+    $rad0Windows.Location = New-Object System.Drawing.Point(4, 44)
+    $rad0Windows.Size = New-Object System.Drawing.Size(200, 22)
+    $rad0Windows.ForeColor = $cText
+    $rad0Windows.Checked = $true
+
+    $rad0Sql = New-Object System.Windows.Forms.RadioButton
+    $rad0Sql.Text = 'SQL Server Authentication'
+    $rad0Sql.Location = New-Object System.Drawing.Point(210, 44)
+    $rad0Sql.Size = New-Object System.Drawing.Size(210, 22)
+    $rad0Sql.ForeColor = $cText
+
+    $lbl0Login = New-Object System.Windows.Forms.Label
+    $lbl0Login.Text = 'Login:'
+    $lbl0Login.Location = New-Object System.Drawing.Point(4, 76)
+    $lbl0Login.AutoSize = $true
+    $lbl0Login.ForeColor = $cDim
+    $txt0Login = New-Object System.Windows.Forms.TextBox
+    $txt0Login.Location = New-Object System.Drawing.Point(140, 72)
+    $txt0Login.Size = New-Object System.Drawing.Size(260, 24)
+    $txt0Login.BackColor = $cWindow
+    $txt0Login.ForeColor = $cText
+    $txt0Login.BorderStyle = 'FixedSingle'
+    $txt0Login.Enabled = $false
+
+    $lbl0Password = New-Object System.Windows.Forms.Label
+    $lbl0Password.Text = 'Password:'
+    $lbl0Password.Location = New-Object System.Drawing.Point(4, 106)
+    $lbl0Password.AutoSize = $true
+    $lbl0Password.ForeColor = $cDim
+    $txt0Password = New-Object System.Windows.Forms.TextBox
+    $txt0Password.Location = New-Object System.Drawing.Point(140, 102)
+    $txt0Password.Size = New-Object System.Drawing.Size(260, 24)
+    $txt0Password.BackColor = $cWindow
+    $txt0Password.ForeColor = $cText
+    $txt0Password.BorderStyle = 'FixedSingle'
+    $txt0Password.UseSystemPasswordChar = $true
+    $txt0Password.Enabled = $false
+
+    $rad0Windows.Add_CheckedChanged({
+        $txt0Login.Enabled = -not $rad0Windows.Checked
+        $txt0Password.Enabled = -not $rad0Windows.Checked
+    })
+
     $lbl0b = New-Object System.Windows.Forms.Label
     $lbl0b.Text = 'Database:'
-    $lbl0b.Location = New-Object System.Drawing.Point(4, 54)
+    $lbl0b.Location = New-Object System.Drawing.Point(4, 144)
     $lbl0b.AutoSize = $true
     $lbl0b.ForeColor = $cDim
     $cmb0Database = New-Object System.Windows.Forms.ComboBox
-    $cmb0Database.Location = New-Object System.Drawing.Point(140, 50)
+    $cmb0Database.Location = New-Object System.Drawing.Point(140, 140)
     $cmb0Database.Size = New-Object System.Drawing.Size(260, 24)
     $cmb0Database.BackColor = $cWindow
     $cmb0Database.ForeColor = $cText
@@ -259,6 +313,12 @@
     $p0.Controls.Add($lbl0a)
     $p0.Controls.Add($txt0Instance)
     $p0.Controls.Add($btn0Connect)
+    $p0.Controls.Add($rad0Windows)
+    $p0.Controls.Add($rad0Sql)
+    $p0.Controls.Add($lbl0Login)
+    $p0.Controls.Add($txt0Login)
+    $p0.Controls.Add($lbl0Password)
+    $p0.Controls.Add($txt0Password)
     $p0.Controls.Add($lbl0b)
     $p0.Controls.Add($cmb0Database)
 
@@ -266,8 +326,36 @@
         Set-Status "Connecting to '$($txt0Instance.Text.Trim())' ..." 'Info'
         try
         {
-            $cp = $script:connParams
-            $dbs = Get-DbaDatabase @cp -SqlInstance $txt0Instance.Text.Trim() -ExcludeSystem -ErrorAction Stop | Sort-Object Name
+            $script:connParams = @{}
+            if ($rad0Sql.Checked)
+            {
+                if (-not $txt0Login.Text.Trim())
+                {
+                    Set-Status 'Error: Login darf bei SQL Server Authentication nicht leer sein.' 'Error'
+                    return
+                }
+                $securePw = ConvertTo-SecureString $txt0Password.Text -AsPlainText -Force
+                $script:connParams['SqlCredential'] = [System.Management.Automation.PSCredential]::new($txt0Login.Text.Trim(), $securePw)
+            }
+
+            # Fuer Schritt 1+ (Get-sqmPartitionCandidateTable & Co. - eigene sqmPartitionTool-
+            # Funktionen, die intern Invoke-DbaQuery mit rohem Instanznamen + -SqlCredential nutzen)
+            # reicht $script:connParams unveraendert wie bisher - empirisch verifiziert, dass diese
+            # mit einem selbst signierten Zertifikat klaglos funktionieren, ohne -TrustServerCertificate.
+            #
+            # Get-DbaDatabase HIER in Schritt 0 ist die Ausnahme: mit rohem Instanznamen scheitert es
+            # bei einem selbst signierten Zertifikat NICHT mit einer Exception, sondern loggt nur eine
+            # WARNUNG und liefert STILLSCHWEIGEND 0 Datenbanken zurueck - das wuerde in der GUI
+            # faelschlich als "0 database(s) found (OK)" erscheinen, ohne dass der eigentliche Fehler
+            # sichtbar wird. Deshalb hier explizit ueber Connect-DbaInstance (+TrustServerCertificate)
+            # verbinden und NUR fuer diesen einen Aufruf das verbundene Objekt verwenden - das wird
+            # NICHT weitergereicht (ein verbundenes Objekt mit abweichender -Database an eine andere
+            # Funktion weiterzugeben fiel bei Tests unerwartet auf Windows-Auth zurueck).
+            $connectParams = @{ SqlInstance = $txt0Instance.Text.Trim(); TrustServerCertificate = $true }
+            if ($script:connParams.ContainsKey('SqlCredential')) { $connectParams['SqlCredential'] = $script:connParams['SqlCredential'] }
+            $serverConn = Connect-DbaInstance @connectParams -ErrorAction Stop
+
+            $dbs = Get-DbaDatabase -SqlInstance $serverConn -ExcludeSystem -ErrorAction Stop | Sort-Object Name
             $cmb0Database.Items.Clear()
             foreach ($d in $dbs) { [void]$cmb0Database.Items.Add($d.Name) }
             if ($cmb0Database.Items.Count -gt 0) { $cmb0Database.SelectedIndex = 0 }
@@ -558,19 +646,51 @@
     $p6.Dock = 'Fill'
     $p6.BackColor = $cPanel
 
+    # "Migrate now" ist ein eigener, zur In-Place-Partitionierung EXKLUSIVER Ausfuehrungsmodus (ruft
+    # Invoke-sqmTableArchiveMigration statt Invoke-sqmTablePartitionConversion auf) - im Unterschied
+    # zu "Copy to an archive database before removal" weiter unten, das nur eine spaetere,
+    # automatisierte Retention konfiguriert (die Quelltabelle wird trotzdem SOFORT in-place
+    # partitioniert und bleibt dort; nur einzelne, ALTE Partitionen wandern spaeter schrittweise ins
+    # Archiv). Beide Modi teilen sich dasselbe "Archive Database"-Feld weiter unten.
+    $chk6MigrateNow = New-Object System.Windows.Forms.CheckBox
+    $chk6MigrateNow.Text = 'Migrate to archive database now (source stays active, unpartitioned)'
+    $chk6MigrateNow.Location = New-Object System.Drawing.Point(4, 8)
+    $chk6MigrateNow.AutoSize = $true
+    $chk6MigrateNow.ForeColor = $cText
+
+    # Nur eingeblendet, wenn die Tabelle TATSAECHLICH eine explizite Schluesselangabe braucht (Heap
+    # oder zusammengesetzter Schluessel mit mehr als 4 Spalten - siehe Test-Step6KeyColumnNeed unten).
+    # Bei einem normalen einspaltigen oder 1-4-spaltigen zusammengesetzten Clustered Index/PK leitet
+    # Invoke-sqmTableArchiveMigration den Schluessel automatisch ab - dann bleibt dieser Bereich
+    # komplett ausgeblendet statt ein ungenutztes Feld anzuzeigen. Auswahl per CheckedListBox
+    # (tatsaechliche Spalten der Tabelle) statt Freitext - kein Tippfehlerrisiko bei Spaltennamen.
+    $lbl6Key = New-Object System.Windows.Forms.Label
+    $lbl6Key.Text = 'Key Column(s) (table has no simple unique key - pick one):'
+    $lbl6Key.Location = New-Object System.Drawing.Point(24, 40)
+    $lbl6Key.AutoSize = $true
+    $lbl6Key.ForeColor = $cDim
+    $clb6Key = New-Object System.Windows.Forms.CheckedListBox
+    $clb6Key.Location = New-Object System.Drawing.Point(24, 64)
+    $clb6Key.Size = New-Object System.Drawing.Size(300, 84)
+    $clb6Key.BackColor = $cWindow
+    $clb6Key.ForeColor = $cText
+    $clb6Key.CheckOnClick = $true
+    $toolTip6Key = New-Object System.Windows.Forms.ToolTip
+    $toolTip6Key.SetToolTip($clb6Key, 'Check the column(s) that together uniquely identify a row (up to 4). Only shown because this table has no single clustered index/PK that could be used automatically.')
+
     $chk6Retention = New-Object System.Windows.Forms.CheckBox
     $chk6Retention.Text = 'Set up automatic maintenance (sliding-window extension + retention)'
-    $chk6Retention.Location = New-Object System.Drawing.Point(4, 8)
+    $chk6Retention.Location = New-Object System.Drawing.Point(4, 40)
     $chk6Retention.AutoSize = $true
     $chk6Retention.ForeColor = $cText
 
     $lbl6a = New-Object System.Windows.Forms.Label
     $lbl6a.Text = 'Retention:'
-    $lbl6a.Location = New-Object System.Drawing.Point(24, 44)
+    $lbl6a.Location = New-Object System.Drawing.Point(24, 76)
     $lbl6a.AutoSize = $true
     $lbl6a.ForeColor = $cDim
     $num6Retention = New-Object System.Windows.Forms.NumericUpDown
-    $num6Retention.Location = New-Object System.Drawing.Point(140, 40)
+    $num6Retention.Location = New-Object System.Drawing.Point(140, 72)
     $num6Retention.Size = New-Object System.Drawing.Size(60, 24)
     $num6Retention.Minimum = 1
     $num6Retention.Maximum = 999
@@ -579,7 +699,7 @@
     $num6Retention.ForeColor = $cText
 
     $cmb6Unit = New-Object System.Windows.Forms.ComboBox
-    $cmb6Unit.Location = New-Object System.Drawing.Point(210, 40)
+    $cmb6Unit.Location = New-Object System.Drawing.Point(210, 72)
     $cmb6Unit.Size = New-Object System.Drawing.Size(100, 24)
     $cmb6Unit.BackColor = $cWindow
     $cmb6Unit.ForeColor = $cText
@@ -587,39 +707,112 @@
     [void]$cmb6Unit.Items.AddRange(@('Months', 'Years'))
     $cmb6Unit.SelectedIndex = 0
 
+    # Bezieht sich NUR auf die laufende, automatisierte Retention oben (nicht auf "Migrate to
+    # archive database now" - dieser ganze Bereich ist in diesem Modus komplett ausgeblendet, siehe
+    # Set-Step6Mode: sobald die Archiv-DB per Migrate-now aufgesetzt ist, laeuft jeder Zugriff nur
+    # noch ueber die rueckwaertsverweisende View in die Archiv-DB - "wenn Partitionen spaeter
+    # ablaufen" ergibt fuer die (dann gar nicht mehr existierende) Quelltabelle keinen Sinn mehr).
     $chk6Archive = New-Object System.Windows.Forms.CheckBox
-    $chk6Archive.Text = 'Copy to an archive database before removal (same instance)'
-    $chk6Archive.Location = New-Object System.Drawing.Point(24, 76)
+    $chk6Archive.Text = 'When partitions expire later, move their data to an archive database first (instead of just deleting it)'
+    $chk6Archive.Location = New-Object System.Drawing.Point(24, 108)
     $chk6Archive.AutoSize = $true
     $chk6Archive.ForeColor = $cText
+    $toolTip6Archive = New-Object System.Windows.Forms.ToolTip
+    $toolTip6Archive.SetToolTip($chk6Archive, "Applies to the ONGOING automated retention above: as old partitions age past the retention window, their data is copied to the archive database before the partition is dropped from this (in-place-partitioned) table. Unrelated to 'Migrate to archive database now' at the top, which moves the WHOLE table immediately instead.")
 
+    # Wird in BEIDEN Modi verwendet (gemeinsames Feld) - Position wird von Set-Step6Mode je nach
+    # Modus/ob der Key-Column-Bereich eingeblendet ist neu gesetzt.
     $lbl6b = New-Object System.Windows.Forms.Label
     $lbl6b.Text = 'Archive Database:'
-    $lbl6b.Location = New-Object System.Drawing.Point(44, 108)
     $lbl6b.AutoSize = $true
     $lbl6b.ForeColor = $cDim
     $txt6ArchiveDb = New-Object System.Windows.Forms.TextBox
-    $txt6ArchiveDb.Location = New-Object System.Drawing.Point(170, 104)
     $txt6ArchiveDb.Size = New-Object System.Drawing.Size(200, 24)
     $txt6ArchiveDb.BackColor = $cWindow
     $txt6ArchiveDb.ForeColor = $cText
     $txt6ArchiveDb.BorderStyle = 'FixedSingle'
 
+    $p6.Controls.Add($chk6MigrateNow)
+    $p6.Controls.Add($lbl6Key); $p6.Controls.Add($clb6Key)
     $p6.Controls.Add($chk6Retention)
     $p6.Controls.Add($lbl6a); $p6.Controls.Add($num6Retention); $p6.Controls.Add($cmb6Unit)
     $p6.Controls.Add($chk6Archive)
     $p6.Controls.Add($lbl6b); $p6.Controls.Add($txt6ArchiveDb)
 
-    function Set-Step6Enabled
+    # Prueft (einmalig pro Tabellenwahl), ob die aktuell gewaehlte Tabelle einen Schluessel hat, aus
+    # dem Invoke-sqmTableArchiveMigration automatisch ableiten kann (1-4-spaltiger Clustered
+    # Index/PK) - exakt dieselbe Abfrage wie die Auto-Ableitung dort. Nur wenn NICHT (Heap oder mehr
+    # als 4 Spalten) wird der Key-Column-Bereich ueberhaupt eingeblendet und mit den echten Spalten
+    # der Tabelle befuellt.
+    $script:step6KeyColumnNeeded = $false
+    $script:step6KeyColumnChecked = $false
+    function Test-Step6KeyColumnNeed
     {
-        $en = $chk6Retention.Checked
-        $lbl6a.Enabled = $en; $num6Retention.Enabled = $en; $cmb6Unit.Enabled = $en; $chk6Archive.Enabled = $en
-        $archEn = $en -and $chk6Archive.Checked
-        $lbl6b.Enabled = $archEn; $txt6ArchiveDb.Enabled = $archEn
+        if ($script:step6KeyColumnChecked) { return }
+        $script:step6KeyColumnChecked = $true
+        try
+        {
+            $cp = $script:connParams
+            $keyQuery = @"
+SELECT c.name AS ColumnName
+FROM sys.indexes i
+JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 0
+JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+WHERE i.object_id = OBJECT_ID(N'[$($script:wiz.SchemaName)].[$($script:wiz.TableName)]') AND i.index_id = 1
+ORDER BY ic.key_ordinal
+"@
+            $keyRows = @(Invoke-DbaQuery @cp -SqlInstance $script:wiz.SqlInstance -Database $script:wiz.Database -Query $keyQuery -ErrorAction Stop)
+            $script:step6KeyColumnNeeded = ($keyRows.Count -eq 0 -or $keyRows.Count -gt 4)
+
+            if ($script:step6KeyColumnNeeded)
+            {
+                $colQuery = "SELECT name FROM sys.columns WHERE object_id = OBJECT_ID(N'[$($script:wiz.SchemaName)].[$($script:wiz.TableName)]') ORDER BY column_id;"
+                $colRows = @(Invoke-DbaQuery @cp -SqlInstance $script:wiz.SqlInstance -Database $script:wiz.Database -Query $colQuery -ErrorAction Stop)
+                $clb6Key.Items.Clear()
+                foreach ($c in $colRows) { [void]$clb6Key.Items.Add($c.name) }
+            }
+        }
+        catch
+        {
+            # Unklar, ob noetig - sicherheitshalber einblenden, damit der Admin die Wahl hat, statt
+            # stillschweigend auf eine fehlschlagende automatische Ableitung zu vertrauen.
+            $script:step6KeyColumnNeeded = $true
+        }
     }
-    $chk6Retention.Add_CheckedChanged({ Set-Step6Enabled })
-    $chk6Archive.Add_CheckedChanged({ Set-Step6Enabled })
-    Set-Step6Enabled
+
+    function Set-Step6Mode
+    {
+        $migrateNow = $chk6MigrateNow.Checked
+        if ($migrateNow) { Test-Step6KeyColumnNeed }
+        $showKey = $migrateNow -and $script:step6KeyColumnNeeded
+
+        $lbl6Key.Visible = $showKey; $clb6Key.Visible = $showKey
+
+        $chk6Retention.Visible = -not $migrateNow
+        $retOn = (-not $migrateNow) -and $chk6Retention.Checked
+        $lbl6a.Visible = $retOn; $num6Retention.Visible = $retOn; $cmb6Unit.Visible = $retOn; $chk6Archive.Visible = -not $migrateNow
+        $archOn = $retOn -and $chk6Archive.Checked
+        $lbl6b.Visible = $migrateNow -or $archOn; $txt6ArchiveDb.Visible = $migrateNow -or $archOn
+
+        # Archive-Database-Feld teilen sich beide Modi - Position haengt davon ab, ob der
+        # Key-Column-Bereich gerade sichtbar ist (Migrate-now) bzw. bleibt an fester Stelle im
+        # Retention-Modus (dort variiert die Y-Position nicht mit dem Inhalt darueber).
+        if ($migrateNow)
+        {
+            $y = if ($showKey) { 156 } else { 40 }
+            $lbl6b.Location = New-Object System.Drawing.Point(24, ($y + 4))
+            $txt6ArchiveDb.Location = New-Object System.Drawing.Point(170, $y)
+        }
+        else
+        {
+            $lbl6b.Location = New-Object System.Drawing.Point(44, 144)
+            $txt6ArchiveDb.Location = New-Object System.Drawing.Point(170, 140)
+        }
+    }
+    $chk6MigrateNow.Add_CheckedChanged({ Set-Step6Mode })
+    $chk6Retention.Add_CheckedChanged({ Set-Step6Mode })
+    $chk6Archive.Add_CheckedChanged({ Set-Step6Mode })
+    Set-Step6Mode
 
     # ===================================================================================
     # Schritt 7: Zusammenfassung + Ausfuehren
@@ -678,29 +871,113 @@
         $lines.Add("Partition Column     : $($script:wiz.PartitionColumn) ($($script:wiz.DataType))")
         $lines.Add("Granularity          : $($script:wiz.Granularity) | BoundaryType: $($script:wiz.BoundaryType)")
         $lines.Add("Filegroup Strategy   : $($script:wiz.FilegroupStrategy) | Future Buffer: $($script:wiz.FutureBufferPeriods) period(s)")
-        $lines.Add("Partitions           : $($script:wiz.Boundaries.Count + 1) ($($script:wiz.Boundaries.Count) boundary value(s))")
-        if ($chk6Retention.Checked)
+        if ($chk6MigrateNow.Checked)
         {
-            $lines.Add("Automated Maintenance: Yes - Retention $($num6Retention.Value) $($cmb6Unit.SelectedItem)")
-            if ($chk6Archive.Checked) { $lines.Add("Archiving            : Yes -> '$($txt6ArchiveDb.Text.Trim())'") }
-            else { $lines.Add('Archiving            : No (delete only)') }
+            $lines.Add("Mode                 : Migrate to archive database NOW -> '$($txt6ArchiveDb.Text.Trim())'")
+            if ($clb6Key.Visible -and $clb6Key.CheckedItems.Count -gt 0) { $lines.Add("Key Column(s)        : $(($clb6Key.CheckedItems | ForEach-Object { $_ }) -join ', ') (explicit)") }
+            else { $lines.Add('Key Column(s)        : (auto-derive from clustered index/PK)') }
+            $lines.Add('                       Source table will be renamed and replaced by a view onto the')
+            $lines.Add('                       archive copy once all closed periods are migrated (current,')
+            $lines.Add('                       still-open period stays behind in the renamed table).')
         }
-        else { $lines.Add('Automated Maintenance: No (one-time conversion only)') }
+        else
+        {
+            $lines.Add("Partitions           : $($script:wiz.Boundaries.Count + 1) ($($script:wiz.Boundaries.Count) boundary value(s))")
+            if ($chk6Retention.Checked)
+            {
+                $lines.Add("Automated Maintenance: Yes - Retention $($num6Retention.Value) $($cmb6Unit.SelectedItem)")
+                if ($chk6Archive.Checked) { $lines.Add("Archiving            : Yes -> '$($txt6ArchiveDb.Text.Trim())'") }
+                else { $lines.Add('Archiving            : No (delete only)') }
+            }
+            else { $lines.Add('Automated Maintenance: No (one-time conversion only)') }
+        }
         $txt7Summary.Text = $lines -join "`r`n"
     }
 
     $btn7Execute.Add_Click({
-        $confirm = [System.Windows.Forms.MessageBox]::Show(
-            "Partition '$($script:wiz.SchemaName).$($script:wiz.TableName)' now?`n`nThis operation changes the table structure (index rebuild).",
-            'Confirm Partitioning', 'YesNo', 'Warning')
+        $migrateNow = $chk6MigrateNow.Checked
+        if ($migrateNow -and -not $txt6ArchiveDb.Text.Trim())
+        {
+            [System.Windows.Forms.MessageBox]::Show("Please enter an Archive Database name.", 'Missing input', 'OK', 'Warning') | Out-Null
+            return
+        }
+
+        $confirmText = if ($migrateNow)
+        {
+            "Migrate '$($script:wiz.SchemaName).$($script:wiz.TableName)' to archive database '$($txt6ArchiveDb.Text.Trim())' now?`n`nThe source table will be renamed and replaced by a view once all closed periods are migrated."
+        }
+        else
+        {
+            "Partition '$($script:wiz.SchemaName).$($script:wiz.TableName)' now?`n`nThis operation changes the table structure (index rebuild)."
+        }
+        $confirm = [System.Windows.Forms.MessageBox]::Show($confirmText, 'Confirm', 'YesNo', 'Warning')
         if ($confirm -ne 'Yes') { return }
 
         $btn7Execute.Enabled = $false
         $btnBack.Enabled = $false
+        $cp = $script:connParams
+
+        if ($migrateNow)
+        {
+            Add-Log "Starting archive migration of '$($script:wiz.SchemaName).$($script:wiz.TableName)' -> '$($txt6ArchiveDb.Text.Trim())' ..."
+            try
+            {
+                $archParams = @{
+                    SqlInstance             = $script:wiz.SqlInstance
+                    Database                = $script:wiz.Database
+                    Schema                  = $script:wiz.SchemaName
+                    Table                   = $script:wiz.TableName
+                    ArchiveDatabaseName     = $txt6ArchiveDb.Text.Trim()
+                    DateColumn              = $script:wiz.PartitionColumn
+                    Granularity             = $script:wiz.Granularity
+                    FilegroupStrategy       = $script:wiz.FilegroupStrategy
+                    FutureBufferPeriods     = $script:wiz.FutureBufferPeriods
+                    AllowKeyChange          = $true
+                    PurgeSourceAfterArchive = $true
+                    CutoverToArchiveView    = $true
+                    Confirm                 = $false
+                    ErrorAction             = 'Stop'
+                    EnableException         = $true
+                }
+                if ($script:wiz.BoundaryType) { $archParams['BoundaryType'] = $script:wiz.BoundaryType }
+                if ($clb6Key.Visible -and $clb6Key.CheckedItems.Count -gt 0)
+                {
+                    $archParams['KeyColumn'] = @($clb6Key.CheckedItems | ForEach-Object { $_ })
+                }
+                elseif ($clb6Key.Visible)
+                {
+                    [System.Windows.Forms.MessageBox]::Show("Please check at least one Key Column - this table has no simple unique key that could be derived automatically.", 'Missing input', 'OK', 'Warning') | Out-Null
+                    $btn7Execute.Enabled = $true
+                    $btnBack.Enabled = $true
+                    return
+                }
+                $result = Invoke-sqmTableArchiveMigration @cp @archParams
+                Add-Log "Migration completed: $($result.MonthsProcessed) month(s) processed, $($result.TotalRowsArchived) row(s) archived, $($result.RowsPurged) row(s) purged from source, status $($result.Status)."
+                if ($result.CutoverPerformed)
+                {
+                    Add-Log "Cutover done: '$($script:wiz.SchemaName).$($script:wiz.TableName)' is now a view onto the archive copy. The renamed original table was kept, not dropped - check the log for its name and any residual (not-yet-archived) rows before dropping it."
+                }
+                else
+                {
+                    Add-Log 'Cutover not yet performed (not all requested periods are archived, or it already ran previously) - run again later to retry/continue.'
+                }
+
+                Add-Log 'DONE.'
+                [System.Windows.Forms.MessageBox]::Show("'$($script:wiz.SchemaName).$($script:wiz.TableName)' migration to '$($txt6ArchiveDb.Text.Trim())' completed.", 'Success', 'OK', 'Information') | Out-Null
+            }
+            catch
+            {
+                Add-Log "ERROR: $($_.Exception.Message)"
+                [System.Windows.Forms.MessageBox]::Show("Error during archive migration:`n$($_.Exception.Message)", 'Error', 'OK', 'Error') | Out-Null
+                $btnBack.Enabled = $true
+                $btn7Execute.Enabled = $true
+            }
+            return
+        }
+
         Add-Log "Starting conversion of '$($script:wiz.SchemaName).$($script:wiz.TableName)' ..."
         try
         {
-            $cp = $script:connParams
             $convParams = @{
                 SqlInstance         = $script:wiz.SqlInstance
                 Database            = $script:wiz.Database
@@ -793,6 +1070,9 @@
                     Set-Status 'Please enter an instance and click "Connect", then select a database.' 'Warn'
                     return $false
                 }
+                # Roher Instanzname + $script:connParams['SqlCredential'] (siehe Schritt 0) - nicht
+                # das verbundene Objekt aus dem Connect-Schritt, das nur fuer den dortigen
+                # Get-DbaDatabase-Aufruf noetig war (siehe Kommentar dort).
                 $script:wiz.SqlInstance = $txt0Instance.Text.Trim()
                 $script:wiz.Database = [string]$cmb0Database.SelectedItem
                 Load-Step1
@@ -808,6 +1088,7 @@
                 $script:wiz.SchemaName = $r.Cells['Schema'].Value
                 $script:wiz.TableName = $r.Cells['Tabelle'].Value
                 $script:wiz.IsHeap = ($r.Cells['Typ'].Value -eq 'Heap')
+                $script:step6KeyColumnChecked = $false
                 Load-Step2
                 return $true
             }

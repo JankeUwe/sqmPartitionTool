@@ -16,6 +16,13 @@
     3. ALTER TABLE ... SWITCH PARTITION <n> TO <staging> (Metadaten-Operation).
     4. Optional (-ArchiveDatabaseName): Zeilen aus der Staging-Tabelle batchweise in die
        Archiv-Datenbank kopieren (dieselbe Instanz), danach Zeilenzahl-Abgleich.
+       - Muss die Archiv-Tabelle dabei erst neu angelegt werden (SELECT INTO ... WHERE 1 = 0),
+         wird optional -DataCompression (Row/Page) per ALTER TABLE ... REBUILD angewendet
+         (SELECT INTO kennt keine Kompressions-Klausel) und optional (-ConfirmArchiveTable) auf
+         eine Admin-Bestaetigung gewartet, BEVOR die Daten aus der Staging-Tabelle kopiert werden.
+         Zu diesem Zeitpunkt ist die Partition bereits per SWITCH in die Staging-Tabelle verschoben
+         (Schritt 3) - bei Ablehnung bleiben Staging-Tabelle und Archiv-Tabelle (leer) unveraendert
+         bestehen, nichts geht verloren.
     5. Staging-Tabelle leeren/droppen.
     6. Defensive Pruefung, dass die Partition wirklich leer ist, ERST DANN
        ALTER PARTITION FUNCTION ... MERGE RANGE (<boundary>).
@@ -41,6 +48,15 @@
     mehr Zeilen als dieser Wert, wird in mehreren Batches (je eine eigene Transaktion) statt in
     einer einzelnen INSERT...SELECT kopiert - vermeidet Transaktionslog-Wachstum und lange
     Sperren bei sehr grossen Partitionen.
+.PARAMETER DataCompression
+    None (Standard), Row oder Page. Wird NUR angewendet wenn die Archiv-Tabelle in diesem Aufruf
+    neu angelegt wird (per ALTER TABLE ... REBUILD nach dem SELECT INTO, das selbst keine
+    Kompressions-Klausel unterstuetzt). Bereits vorhandene Archiv-Tabellen werden nicht veraendert.
+.PARAMETER ConfirmArchiveTable
+    Nur relevant wenn die Archiv-Tabelle in diesem Aufruf neu angelegt wird: pausiert danach und
+    fragt per Read-Host nach Admin-Bestaetigung, bevor die Daten aus der Staging-Tabelle kopiert
+    werden. Die Partition wurde zu diesem Zeitpunkt bereits per SWITCH in die Staging-Tabelle
+    verschoben - bei Ablehnung bleiben Staging- und (leere) Archiv-Tabelle unveraendert bestehen.
 .PARAMETER SqlCredential
     Optionales PSCredential.
 .PARAMETER EnableException
@@ -85,6 +101,13 @@ function Invoke-sqmPartitionArchive
 
 		[Parameter(Mandatory = $false)]
 		[int]$ArchiveBatchSize = 50000,
+
+		[Parameter(Mandatory = $false)]
+		[ValidateSet('None', 'Row', 'Page')]
+		[string]$DataCompression = 'None',
+
+		[Parameter(Mandatory = $false)]
+		[switch]$ConfirmArchiveTable,
 
 		[Parameter(Mandatory = $false)]
 		[System.Management.Automation.PSCredential]$SqlCredential,
@@ -145,80 +168,24 @@ function Invoke-sqmPartitionArchive
 		$stagingTable = "${Table}_sqmStage_$PartitionNumber"
 		Invoke-DbaQuery @connParams -Query "IF OBJECT_ID(N'[$Schema].[$stagingTable]') IS NOT NULL DROP TABLE [$Schema].[$stagingTable];" -ErrorAction Stop -EnableException
 
-		function _FormatColumnType($col)
-		{
-			switch ($col.TypeName)
-			{
-				{ $_ -in @('varchar', 'char', 'binary', 'varbinary') } { return "$($col.TypeName)($(if ($col.max_length -eq -1) { 'max' } else { $col.max_length }))" }
-				{ $_ -in @('nvarchar', 'nchar') } { return "$($col.TypeName)($(if ($col.max_length -eq -1) { 'max' } else { $col.max_length / 2 }))" }
-				'decimal' { return "decimal($($col.precision),$($col.scale))" }
-				'numeric' { return "numeric($($col.precision),$($col.scale))" }
-				default { return $col.TypeName }
-			}
+		# Spalten + Indizes/PK/UNIQUE nachbilden - Pflicht fuer SWITCH PARTITION, das fuer JEDEN
+		# Index der Quelle einen strukturell identischen Index auf dem Ziel verlangt, alle auf
+		# demselben Filegroup wie die Zielpartition (siehe Get-sqmTableDefinitionSql fuer Details/
+		# Begruendung der IDENTITY-/Constraint-Sonderfaelle).
+		$defParams = @{
+			SqlInstance   = $SqlInstance
+			Database      = $Database
+			Schema        = $Schema
+			Table         = $Table
+			TargetTable   = $stagingTable
+			FilegroupName = $targetPartition.FilegroupName
 		}
+		if ($SqlCredential) { $defParams['SqlCredential'] = $SqlCredential }
+		$tableDef = Get-sqmTableDefinitionSql @defParams -EnableException
 
-		$colDefQuery = @"
-SELECT c.name AS ColumnName, ty.name AS TypeName, c.max_length, c.precision, c.scale, c.is_nullable,
-    c.is_identity, ic.seed_value, ic.increment_value
-FROM sys.columns c
-JOIN sys.types ty ON ty.user_type_id = c.user_type_id
-LEFT JOIN sys.identity_columns ic ON ic.object_id = c.object_id AND ic.column_id = c.column_id
-WHERE c.object_id = OBJECT_ID(N'[$Schema].[$Table]')
-ORDER BY c.column_id
-"@
-		$colDefs = Invoke-DbaQuery @connParams -Query $colDefQuery -ErrorAction Stop -EnableException
-		$colDefSql = ($colDefs | ForEach-Object {
-				$nullability = if ($_.is_nullable) { 'NULL' } else { 'NOT NULL' }
-				# IDENTITY-Eigenschaft muss zwischen Quelle und Staging-Tabelle uebereinstimmen -
-				# sonst lehnt SWITCH PARTITION mit der irrefuehrenden Meldung "kein identischer
-				# Index" ab (SQL Server meldet einen IDENTITY-Mismatch ueber denselben Fehlertext).
-				$identityClause = if ([bool]$_.is_identity) { " IDENTITY($($_.seed_value),$($_.increment_value))" } else { '' }
-				"[$($_.ColumnName)] $(_FormatColumnType $_)$identityClause $nullability"
-			}) -join ', '
-
-		Invoke-DbaQuery @connParams -Query "CREATE TABLE [$Schema].[$stagingTable] ($colDefSql) ON [$($targetPartition.FilegroupName)];" -ErrorAction Stop -EnableException
-
-		# Alle Indizes (Clustered + Nonclustered) auf der Staging-Tabelle nachbilden - Pflicht fuer
-		# SWITCH PARTITION, das fuer JEDEN Index der Quelle einen strukturell identischen Index auf
-		# dem Ziel verlangt, alle auf demselben Filegroup wie die Zielpartition. Ist ein Index als
-		# PRIMARY KEY/UNIQUE CONSTRAINT hinterlegt, akzeptiert SQL Server dafuer KEINEN gleichwertigen
-		# "einfachen" Index als Gegenstueck - die Constraint-Eigenschaft selbst muss ebenfalls
-        # uebereinstimmen (empirisch verifiziert: sonst "kein identischer Index"-Fehler trotz
-        # identischer Spalten/Eindeutigkeit).
-		$idxQuery = @"
-SELECT i.index_id, i.is_unique, i.type_desc, kc.type AS ConstraintType
-FROM sys.indexes i
-LEFT JOIN sys.key_constraints kc ON kc.parent_object_id = i.object_id AND kc.unique_index_id = i.index_id
-WHERE i.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND i.index_id >= 1
-ORDER BY i.index_id
-"@
-		$srcIndexes = Invoke-DbaQuery @connParams -Query $idxQuery -ErrorAction Stop -EnableException
-		foreach ($idx in $srcIndexes)
+		Invoke-DbaQuery @connParams -Query $tableDef.CreateTableSql -ErrorAction Stop -EnableException
+		foreach ($idxDdl in $tableDef.IndexSql)
 		{
-			$idxColQuery = @"
-SELECT c.name AS ColumnName, ic.is_descending_key, ic.is_included_column
-FROM sys.index_columns ic
-JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
-WHERE ic.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND ic.index_id = $($idx.index_id)
-ORDER BY ic.is_included_column, ic.key_ordinal, ic.index_column_id
-"@
-			$idxCols = Invoke-DbaQuery @connParams -Query $idxColQuery -ErrorAction Stop -EnableException
-			$keyCols = @($idxCols | Where-Object { -not [bool]$_.is_included_column } | ForEach-Object { "[$($_.ColumnName)]$(if ([bool]$_.is_descending_key) { ' DESC' })" })
-			$includeCols = @($idxCols | Where-Object { [bool]$_.is_included_column } | ForEach-Object { "[$($_.ColumnName)]" })
-			$clusterKw = if ($idx.type_desc -eq 'CLUSTERED') { 'CLUSTERED' } else { 'NONCLUSTERED' }
-			$includeClause = if ($includeCols.Count -gt 0) { " INCLUDE ($($includeCols -join ', '))" } else { '' }
-
-			if ($idx.ConstraintType -in @('PK', 'UQ'))
-			{
-				$constraintKw = if ($idx.ConstraintType -eq 'PK') { 'PRIMARY KEY' } else { 'UNIQUE' }
-				$constraintName = "${constraintKw}_${stagingTable}_$($idx.index_id)" -replace ' ', '_'
-				$idxDdl = "ALTER TABLE [$Schema].[$stagingTable] ADD CONSTRAINT [$constraintName] $constraintKw $clusterKw ($($keyCols -join ', ')) ON [$($targetPartition.FilegroupName)];"
-			}
-			else
-			{
-				$uniqueKw = if ([bool]$idx.is_unique) { 'UNIQUE ' } else { '' }
-				$idxDdl = "CREATE ${uniqueKw}${clusterKw} INDEX [IX_${stagingTable}_$($idx.index_id)] ON [$Schema].[$stagingTable] ($($keyCols -join ', '))$includeClause ON [$($targetPartition.FilegroupName)];"
-			}
 			Invoke-DbaQuery @connParams -Query $idxDdl -ErrorAction Stop -EnableException
 		}
 		# Quelle ist Heap -> Staging-Tabelle bleibt ebenfalls Heap (bereits korrekt auf dem
@@ -249,6 +216,23 @@ ORDER BY ic.is_included_column, ic.key_ordinal, ic.index_column_id
 				"SELECT * INTO [$ArchiveDatabaseName].[$ArchiveSchemaName].[$Table] FROM [$Schema].[$stagingTable] WHERE 1 = 0;"
 				Invoke-DbaQuery @connParams -Query $createArchSql -ErrorAction Stop -EnableException
 				Invoke-sqmLogging -Message "Archiv-Tabelle '$ArchiveDatabaseName.$ArchiveSchemaName.$Table' angelegt." -FunctionName $functionName -Level "INFO"
+
+				if ($DataCompression -ne 'None')
+				{
+					$compressionSql = "ALTER TABLE [$ArchiveDatabaseName].[$ArchiveSchemaName].[$Table] REBUILD WITH (DATA_COMPRESSION = $($DataCompression.ToUpper()));"
+					Invoke-DbaQuery @connParams -Query $compressionSql -ErrorAction Stop -EnableException
+					Invoke-sqmLogging -Message "$DataCompression-Kompression auf '$ArchiveDatabaseName.$ArchiveSchemaName.$Table' angewendet." -FunctionName $functionName -Level "INFO"
+				}
+
+				if ($ConfirmArchiveTable)
+				{
+					Invoke-sqmLogging -Message "Warte auf Admin-Bestaetigung vor dem Kopieren der Partitionsdaten in '$ArchiveDatabaseName.$ArchiveSchemaName.$Table'." -FunctionName $functionName -Level "INFO"
+					$goAhead = Read-Host "Archiv-Tabelle '$ArchiveDatabaseName.$ArchiveSchemaName.$Table' wurde angelegt. Jetzt Daten aus '$stagingTable' kopieren? (j/n)"
+					if ($goAhead -notmatch '^[jJyY]')
+					{
+						throw "Abgebrochen nach Anlage der Archiv-Tabelle (Admin-Bestaetigung verweigert). Partition $PartitionNumber wurde bereits per SWITCH nach '[$Schema].[$stagingTable]' verschoben und bleibt dort (NICHT geleert/geloescht) - '$ArchiveDatabaseName.$ArchiveSchemaName.$Table' bleibt leer. Manuell pruefen; ein erneuter Aufruf ohne explizites -PartitionNumber waehlt ggf. eine ANDERE Partition (die aktuell aelteste MIT Daten), da diese Partition im Quellindex bereits leer ist."
+					}
+				}
 			}
 
 			# Staging-Tabelle wird NICHT vor dem Zeilenzahl-Abgleich geleert (Schritt 6 uebernimmt das
@@ -261,9 +245,9 @@ ORDER BY ic.is_included_column, ic.key_ordinal, ic.index_column_id
 			# auf die Archiv-Tabelle - ein einfaches INSERT...SELECT * wird dann von SQL Server
 			# abgelehnt, sofern nicht explizit eine Spaltenliste verwendet und IDENTITY_INSERT gesetzt
 			# wird.
-			$hasIdentityCol = [bool]($colDefs | Where-Object { [bool]$_.is_identity })
-			$archColList = ($colDefs | ForEach-Object { "[$($_.ColumnName)]" }) -join ', '
-			$archColListDeleted = ($colDefs | ForEach-Object { "DELETED.[$($_.ColumnName)]" }) -join ', '
+			$hasIdentityCol = $tableDef.HasIdentity
+			$archColList = ($tableDef.ColumnNames | ForEach-Object { "[$_]" }) -join ', '
+			$archColListDeleted = ($tableDef.ColumnNames | ForEach-Object { "DELETED.[$_]" }) -join ', '
 
 			# Bei sehr grossen Partitionen wuerde eine einzelne INSERT...SELECT alle Zeilen in EINER
 			# Transaktion kopieren (Transaktionslog-Wachstum, lange Sperren, Timeout-Risiko). Ab

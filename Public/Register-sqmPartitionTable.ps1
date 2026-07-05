@@ -29,7 +29,7 @@
 .PARAMETER Granularity
     Month, Quarter oder Year.
 .PARAMETER BoundaryType
-    Date oder Int.
+    Date, Int oder Varchar.
 .PARAMETER FilegroupStrategy
     Single oder PerPeriod.
 .PARAMETER FutureBufferPeriods
@@ -92,7 +92,7 @@ function Register-sqmPartitionTable
 		[string]$Granularity,
 
 		[Parameter(Mandatory = $true)]
-		[ValidateSet('Date', 'Int')]
+		[ValidateSet('Date', 'Int', 'Varchar')]
 		[string]$BoundaryType,
 
 		[Parameter(Mandatory = $false)]

@@ -25,8 +25,9 @@
     Month, Quarter oder Year.
 
 .PARAMETER BoundaryType
-    Date (echte date/datetime2-Spalte) oder Int (Surrogatschluessel im Format YYYYMMDD, z.B.
-    20240115). Bei Int werden MinValue/MaxValue als YYYYMMDD-Ganzzahl erwartet/zurueckgegeben.
+    Date (echte date/datetime2-Spalte), Int (Surrogatschluessel im Format YYYYMMDD, z.B. 20240115)
+    oder Varchar (VARCHAR/NVARCHAR mit YYYYMMDD-String-Format, z.B. '20240115'). Bei Int werden
+    MinValue/MaxValue als YYYYMMDD-Ganzzahl erwartet/zurueckgegeben, bei Varchar als String.
 
 .PARAMETER FutureBufferPeriods
     Anzahl zusaetzlicher, leerer Perioden nach der letzten Datenperiode. Standard: 3.
@@ -36,6 +37,9 @@
 
 .EXAMPLE
     Get-sqmPartitionBoundaryList -MinValue 20230115 -MaxValue 20241103 -Granularity Quarter -BoundaryType Int -FutureBufferPeriods 2
+
+.EXAMPLE
+    Get-sqmPartitionBoundaryList -MinValue '20230115' -MaxValue '20241103' -Granularity Month -BoundaryType Varchar
 
 .NOTES
     Keine Datenbankabhaengigkeit - reine Berechnungsfunktion, primäres Ziel für Unit-Tests.
@@ -56,7 +60,7 @@ function Get-sqmPartitionBoundaryList
 		[string]$Granularity,
 
 		[Parameter(Mandatory = $true)]
-		[ValidateSet('Date', 'Int')]
+		[ValidateSet('Date', 'Int', 'Varchar')]
 		[string]$BoundaryType,
 
 		[Parameter(Mandatory = $false)]
@@ -66,9 +70,9 @@ function Get-sqmPartitionBoundaryList
 
 	function _ToDateTime($value, [string]$boundaryType)
 	{
-		if ($boundaryType -eq 'Int')
+		if ($boundaryType -in @('Int', 'Varchar'))
 		{
-			return [datetime]::ParseExact([string][int64]$value, 'yyyyMMdd', $null)
+			return [datetime]::ParseExact([string]$value, 'yyyyMMdd', $null)
 		}
 		return [datetime]$value
 	}
@@ -136,7 +140,12 @@ function Get-sqmPartitionBoundaryList
 	$index = 0
 	$results = foreach ($pd in $periodDates)
 	{
-		$boundaryValue = if ($BoundaryType -eq 'Int') { [int]$pd.ToString('yyyyMMdd') } else { $pd }
+		$boundaryValue = switch ($BoundaryType)
+		{
+			'Int'     { [int]$pd.ToString('yyyyMMdd') }
+			'Varchar' { $pd.ToString('yyyyMMdd') }
+			default   { $pd }
+		}
 		[PSCustomObject]@{
 			PeriodIndex   = $index
 			PeriodStart   = $pd

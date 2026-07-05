@@ -20,6 +20,16 @@
     - Heap (kein Clustered Index): -Method Default legt einen neuen Clustered Index direkt auf
       dem Partition Scheme an; -Method NewTableSwap fuer sehr grosse Heaps (Tabellenkopie +
       Umbenennung).
+    - -Method BatchedSwap (Heap UND indizierte/PK-Tabellen): fuer sehr grosse Tabellen auf
+      SAN/Datentraeger mit wenig freiem Platz. Legt eine neue, leere partitionierte Kopie an und
+      verschiebt die Daten SEGMENTWEISE (je Boundary-Periode, weiter unterteilt in -BatchSize)
+      per atomarem 'DELETE ... OUTPUT ... INTO' (Quelle und Ziel in derselben Datenbank - kein
+      separater Verify-Schritt noetig, im Unterschied zu Invoke-sqmTableArchiveMigration ueber
+      Datenbankgrenzen hinweg). Optional -DataCompression und periodisches Shrinken
+      (-ShrinkAfterEveryNSegments/-AggressiveShrink) der alten Tabelle, waehrend sie sich leert.
+      Abschliessend sp_rename-Swap (alte, jetzt leere Tabelle -> "..._sqmPartOld", neue Tabelle ->
+      Originalname). V1-Einschraenkung: bricht mit Fehler ab, wenn die Tabelle eingehende
+      Fremdschluessel oder Trigger hat (siehe -Method Default/NewTableSwap fuer diese Faelle).
 
     Registriert die Tabelle danach in master.dbo.sqm_PartitionRegistry (Register-sqmPartitionTable),
     ausser -NoRegister ist gesetzt.
@@ -37,8 +47,9 @@
 .PARAMETER Granularity
     Month, Quarter oder Year.
 .PARAMETER BoundaryType
-    Date (Standard bei date/datetime/datetime2/smalldatetime-Spalten) oder Int (Surrogatschluessel
-    im Format YYYYMMDD). Ohne Angabe wird aus dem Spaltentyp automatisch abgeleitet.
+    Date (Standard bei date/datetime/datetime2/smalldatetime-Spalten), Int (int/bigint/smallint im
+    Format YYYYMMDD) oder Varchar (varchar/nvarchar mit YYYYMMDD-String-Format). Ohne Angabe wird
+    aus dem Spaltentyp automatisch abgeleitet.
 .PARAMETER FilegroupStrategy
     Single (Standard) oder PerPeriod.
 .PARAMETER FutureBufferPeriods
@@ -53,11 +64,27 @@
     Bestaetigt explizit, dass ein PRIMARY KEY/UNIQUE-Constraint um die Partitionsspalte erweitert
     werden darf (Pflicht, wenn Test-sqmPartitionReadiness das verlangt - siehe Warnungen dort).
 .PARAMETER Method
-    Default (Standard) oder NewTableSwap (fuer sehr grosse Heaps - Tabellenkopie statt Online-
-    Index-Aufbau).
+    Default (Standard), NewTableSwap (fuer sehr grosse Heaps - Tabellenkopie statt Online-
+    Index-Aufbau) oder BatchedSwap (fuer sehr grosse Tabellen mit wenig freiem Speicherplatz -
+    segmentweises Kopieren+Loeschen statt einer einzelnen grossen Operation, siehe DESCRIPTION).
 .PARAMETER Online
     Versucht ONLINE=ON beim Index-Rebuild (nur Enterprise/Developer Edition). Faellt auf anderen
-    Editionen automatisch mit Warnung auf OFFLINE zurueck.
+    Editionen automatisch mit Warnung auf OFFLINE zurueck. Ohne Wirkung bei -Method BatchedSwap.
+.PARAMETER BatchSize
+    Nur -Method BatchedSwap: Zeilen pro Kopier-/Loeschbatch *innerhalb* eines Boundary-Segments.
+    Standard: 50000.
+.PARAMETER DataCompression
+    Nur -Method BatchedSwap: None (Standard), Row oder Page. Wird direkt nach dem Anlegen der
+    neuen (noch leeren) partitionierten Kopie angewendet (ALTER TABLE ... REBUILD
+    PARTITION = ALL WITH (DATA_COMPRESSION = ...) - CREATE TABLE kennt keine Kompressions-Klausel).
+.PARAMETER ShrinkAfterEveryNSegments
+    Nur -Method BatchedSwap: nach wie vielen geleerten Boundary-Segmenten DBCC SHRINKFILE (siehe
+    -AggressiveShrink) auf den Datendateien der aktuellen Filegroup der ALTEN Tabelle ausgefuehrt
+    wird. Standard: 1 (nach jedem Segment).
+.PARAMETER AggressiveShrink
+    Nur -Method BatchedSwap: standardmaessig TRUNCATEONLY (schnell, keine Fragmentierung, gibt
+    aber nur am Dateiende freien Platz zurueck). Mit diesem Schalter voller Shrink (mehr
+    Platzgewinn, fragmentiert die verbleibenden Indizes - Rebuild danach empfohlen).
 .PARAMETER NoRegister
     Tabelle NICHT in sqm_PartitionRegistry eintragen (z.B. fuer einmalige/manuell verwaltete
     Partitionierungen ohne automatische Wartungs-Jobs).
@@ -104,7 +131,7 @@ function Invoke-sqmTablePartitionConversion
 		[string]$Granularity,
 
 		[Parameter(Mandatory = $false)]
-		[ValidateSet('Date', 'Int')]
+		[ValidateSet('Date', 'Int', 'Varchar')]
 		[string]$BoundaryType,
 
 		[Parameter(Mandatory = $false)]
@@ -124,11 +151,26 @@ function Invoke-sqmTablePartitionConversion
 		[switch]$AllowKeyChange,
 
 		[Parameter(Mandatory = $false)]
-		[ValidateSet('Default', 'NewTableSwap')]
+		[ValidateSet('Default', 'NewTableSwap', 'BatchedSwap')]
 		[string]$Method = 'Default',
 
 		[Parameter(Mandatory = $false)]
 		[switch]$Online,
+
+		[Parameter(Mandatory = $false)]
+		[ValidateRange(100, 1000000)]
+		[int]$BatchSize = 50000,
+
+		[Parameter(Mandatory = $false)]
+		[ValidateSet('None', 'Row', 'Page')]
+		[string]$DataCompression = 'None',
+
+		[Parameter(Mandatory = $false)]
+		[ValidateRange(1, 1000)]
+		[int]$ShrinkAfterEveryNSegments = 1,
+
+		[Parameter(Mandatory = $false)]
+		[switch]$AggressiveShrink,
 
 		[Parameter(Mandatory = $false)]
 		[switch]$NoRegister,
@@ -169,6 +211,32 @@ function Invoke-sqmTablePartitionConversion
 		}
 		foreach ($w in $readiness.Warnings) { Invoke-sqmLogging -Message "Warnung: $w" -FunctionName $functionName -Level "WARNING" }
 
+		# -Method BatchedSwap baut eine NEUE Tabelle auf und benennt sie an die Stelle der alten -
+		# eingehende Fremdschluessel/Trigger werden dabei NICHT automatisch mituebernommen (V1-
+		# Einschraenkung, siehe DESCRIPTION). Frueh abbrechen statt erst mitten im Umbau zu scheitern.
+		if ($Method -eq 'BatchedSwap')
+		{
+			$fkCheckQuery = "SELECT fk.name AS ForeignKeyName, OBJECT_SCHEMA_NAME(fk.parent_object_id) + '.' + OBJECT_NAME(fk.parent_object_id) AS ReferencingTable FROM sys.foreign_keys fk WHERE fk.referenced_object_id = OBJECT_ID(N'[$Schema].[$Table]');"
+			$incomingFks = @(Invoke-DbaQuery @connParams -Query $fkCheckQuery -ErrorAction Stop)
+			if ($incomingFks.Count -gt 0)
+			{
+				$fkList = ($incomingFks | ForEach-Object { "$($_.ReferencingTable) ($($_.ForeignKeyName))" }) -join '; '
+				$msg = "-Method BatchedSwap unterstuetzt aktuell keine Tabellen mit eingehenden Fremdschluesseln: $fkList. Fremdschluessel vorher entfernen oder -Method Default/NewTableSwap verwenden."
+				Invoke-sqmLogging -Message $msg -FunctionName $functionName -Level "ERROR"
+				throw $msg
+			}
+
+			$triggerCheckQuery = "SELECT name FROM sys.triggers WHERE parent_id = OBJECT_ID(N'[$Schema].[$Table]') AND parent_class = 1;"
+			$triggers = @(Invoke-DbaQuery @connParams -Query $triggerCheckQuery -ErrorAction Stop)
+			if ($triggers.Count -gt 0)
+			{
+				$triggerList = ($triggers | ForEach-Object { $_.name }) -join ', '
+				$msg = "-Method BatchedSwap unterstuetzt aktuell keine Tabellen mit Triggern: $triggerList. Trigger vorher entfernen oder -Method Default/NewTableSwap verwenden."
+				Invoke-sqmLogging -Message $msg -FunctionName $functionName -Level "ERROR"
+				throw $msg
+			}
+		}
+
 		# =========================================================================================
 		# 2. Spaltentyp + BoundaryType ermitteln
 		# =========================================================================================
@@ -193,14 +261,25 @@ WHERE s.name = N'$Schema' AND t.name = N'$Table' AND c.name = N'$PartitionColumn
 		}
 
 		$dateTypes = @('date', 'datetime', 'datetime2', 'smalldatetime', 'datetimeoffset')
+		$intTypes = @('int', 'bigint', 'smallint')
+		$varcharTypes = @('varchar', 'nvarchar', 'char', 'nchar')
+
 		if (-not $BoundaryType)
 		{
-			$BoundaryType = if ($typeName -in $dateTypes) { 'Date' } else { 'Int' }
+			$BoundaryType = if ($typeName -in $dateTypes) { 'Date' } `
+				elseif ($typeName -in $varcharTypes) { 'Varchar' } `
+				else { 'Int' }
 			Invoke-sqmLogging -Message "BoundaryType nicht angegeben - aus Spaltentyp '$typeName' abgeleitet: $BoundaryType." -FunctionName $functionName -Level "INFO"
 		}
-		if ($BoundaryType -eq 'Int' -and $typeName -notin @('int', 'bigint', 'smallint'))
+
+		if ($BoundaryType -eq 'Int' -and $typeName -notin $intTypes)
 		{
-			Invoke-sqmLogging -Message "BoundaryType 'Int' bei Spaltentyp '$typeName' - es wird ein YYYYMMDD-Format erwartet. Falls die Spalte kein Datums-Surrogatschluessel ist, ist Month/Quarter/Year-Granularitaet vermutlich nicht sinnvoll." -FunctionName $functionName -Level "WARNING"
+			Invoke-sqmLogging -Message "BoundaryType 'Int' bei Spaltentyp '$typeName' - es wird ein YYYYMMDD-Format als Ganzzahl erwartet. Falls die Spalte kein Datums-Surrogatschluessel ist, ist Month/Quarter/Year-Granularitaet vermutlich nicht sinnvoll." -FunctionName $functionName -Level "WARNING"
+		}
+
+		if ($BoundaryType -eq 'Varchar' -and $typeName -notin $varcharTypes)
+		{
+			Invoke-sqmLogging -Message "BoundaryType 'Varchar' bei Spaltentyp '$typeName' - es wird ein YYYYMMDD-String-Format erwartet. Falls die Spalte kein Datums-Surrogatschluessel ist, ist Month/Quarter/Year-Granularitaet vermutlich nicht sinnvoll." -FunctionName $functionName -Level "WARNING"
 		}
 
 		# =========================================================================================
@@ -295,42 +374,173 @@ GROUP BY i.name, i.is_unique, i.is_primary_key, i.is_unique_constraint
 			}
 		}
 
-		if ($ci)
+		if ($Method -eq 'BatchedSwap')
 		{
-			$existingKeyCols = @($ci.KeyColumns -split ',')
-			$keyColsWithPartition = if ($PartitionColumn -in $existingKeyCols) { $existingKeyCols } else { $existingKeyCols + $PartitionColumn }
-			$keyColList = ($keyColsWithPartition | ForEach-Object { "[$_]" }) -join ', '
+			Invoke-sqmLogging -Message "-Method BatchedSwap fuer '$Schema.$Table' - segmentweises Kopieren+Loeschen (atomar je Batch, keine eingehenden Fremdschluessel/Trigger vorhanden)." -FunctionName $functionName -Level "INFO"
 
-			if (($ci.is_primary_key -or $ci.is_unique_constraint) -and $PartitionColumn -notin $existingKeyCols)
+			$swapTable = "${Table}_sqmPartNew"
+			Invoke-DbaQuery @connParams -Query "IF OBJECT_ID(N'[$Schema].[$swapTable]') IS NOT NULL DROP TABLE [$Schema].[$swapTable];" -ErrorAction Stop -EnableException
+
+			$defParams = @{
+				SqlInstance         = $SqlInstance
+				Database            = $Database
+				Schema              = $Schema
+				Table               = $Table
+				TargetTable         = $swapTable
+				PartitionSchemeName = $scheme.PartitionSchemeName
+				PartitionColumn     = $PartitionColumn
+			}
+			if ($SqlCredential) { $defParams['SqlCredential'] = $SqlCredential }
+			$tableDef = Get-sqmTableDefinitionSql @defParams -EnableException
+
+			Invoke-DbaQuery @connParams -Query $tableDef.CreateTableSql -ErrorAction Stop -EnableException
+			foreach ($idxDdl in $tableDef.IndexSql)
 			{
-				# PK/UNIQUE-Constraint muss neu definiert werden (DROP_EXISTING allein reicht hier nicht,
-				# die Constraint-Spaltenliste muss die Partitionsspalte mit enthalten).
-				$constraintType = if ($ci.is_primary_key) { 'PRIMARY KEY' } else { 'UNIQUE' }
-				$ddl = @"
+				Invoke-DbaQuery @connParams -Query $idxDdl -ErrorAction Stop -EnableException
+			}
+			Invoke-sqmLogging -Message "Neue partitionierte Tabelle '$swapTable' angelegt (Struktur von '$Schema.$Table' uebernommen)." -FunctionName $functionName -Level "INFO"
+
+			if ($DataCompression -ne 'None')
+			{
+				$compressionSql = "ALTER TABLE [$Schema].[$swapTable] REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = $($DataCompression.ToUpper()));"
+				Invoke-DbaQuery @connParams -Query $compressionSql -ErrorAction Stop -EnableException
+				Invoke-sqmLogging -Message "$DataCompression-Kompression auf '$swapTable' angewendet (alle Partitionen)." -FunctionName $functionName -Level "INFO"
+			}
+
+			# Aktuelle Filegroup der ALTEN Tabelle ermitteln - Ziel fuer periodisches Shrinken waehrend
+			# sie sich leert (unpartitioniert, liegt also auf genau einer Filegroup).
+			$oldFgQuery = @"
+SELECT DISTINCT fg.name AS FilegroupName
+FROM sys.partitions p
+JOIN sys.allocation_units au ON au.container_id = p.hobt_id
+JOIN sys.filegroups fg ON fg.data_space_id = au.data_space_id
+WHERE p.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND p.index_id IN (0, 1);
+"@
+			$oldFgRows = @(Invoke-DbaQuery @connParams -Query $oldFgQuery -ErrorAction Stop)
+			$oldFilegroupName = if ($oldFgRows.Count -gt 0) { $oldFgRows[0].FilegroupName } else { $null }
+
+			function _BoundaryLiteral($value, [string]$boundaryType)
+			{
+				switch ($boundaryType)
+				{
+					'Date'    { return "'$(([datetime]$value).ToString('yyyy-MM-dd'))'" }
+					'Varchar' { return "'$value'" }
+					default   { return "$value" }
+				}
+			}
+
+			# Segmentgrenzen aus der bereits berechneten Boundary-Liste: [null,b0), [b0,b1), ..., [bN-1,null).
+			# Erstes und letztes Segment sind durch die Sliding-Window-Konstruktion immer leer (siehe
+			# Get-sqmPartitionBoundaryList) - kein Sonderfall noetig, sie liefern einfach 0 Zeilen.
+			$segmentBounds = [System.Collections.Generic.List[object]]::new()
+			$prevBoundary = $null
+			foreach ($b in $boundaries)
+			{
+				$segmentBounds.Add([PSCustomObject]@{ Start = $prevBoundary; End = $b.BoundaryValue })
+				$prevBoundary = $b.BoundaryValue
+			}
+			$segmentBounds.Add([PSCustomObject]@{ Start = $prevBoundary; End = $null })
+
+			$colListSql = ($tableDef.ColumnNames | ForEach-Object { "[$_]" }) -join ', '
+			$colListDeleted = ($tableDef.ColumnNames | ForEach-Object { "DELETED.[$_]" }) -join ', '
+
+			$totalMoved = 0
+			$segmentsDone = 0
+			foreach ($seg in $segmentBounds)
+			{
+				$whereParts = [System.Collections.Generic.List[string]]::new()
+				if ($null -ne $seg.Start) { $whereParts.Add("[$PartitionColumn] >= $(_BoundaryLiteral $seg.Start $BoundaryType)") }
+				if ($null -ne $seg.End) { $whereParts.Add("[$PartitionColumn] < $(_BoundaryLiteral $seg.End $BoundaryType)") }
+				$whereClause = if ($whereParts.Count -gt 0) { "WHERE " + ($whereParts -join ' AND ') } else { '' }
+
+				$segMoved = 0
+				$rowsAffected = 1
+				while ($rowsAffected -gt 0)
+				{
+					$moveBody = "DELETE TOP ($BatchSize) FROM [$Schema].[$Table] OUTPUT $colListDeleted INTO [$Schema].[$swapTable] ($colListSql) $whereClause; SELECT @@ROWCOUNT AS Cnt;"
+					$moveSql = if ($tableDef.HasIdentity)
+					{
+						"SET IDENTITY_INSERT [$Schema].[$swapTable] ON; $moveBody SET IDENTITY_INSERT [$Schema].[$swapTable] OFF;"
+					}
+					else { $moveBody }
+
+					$rowsAffected = [int64](Invoke-DbaQuery @connParams -Query $moveSql -ErrorAction Stop -EnableException).Cnt
+					$segMoved += $rowsAffected
+				}
+
+				$totalMoved += $segMoved
+				$segmentsDone++
+				if ($segMoved -gt 0)
+				{
+					Invoke-sqmLogging -Message "Segment $segmentsDone/$($segmentBounds.Count) : $segMoved Zeile(n) verschoben." -FunctionName $functionName -Level "INFO"
+
+					if ($segmentsDone % $ShrinkAfterEveryNSegments -eq 0)
+					{
+						try
+						{
+							$shrinkParams = @{ SqlInstance = $SqlInstance; Database = $Database; Confirm = $false; EnableException = $true }
+							if ($oldFilegroupName) { $shrinkParams['FilegroupName'] = $oldFilegroupName }
+							if ($SqlCredential) { $shrinkParams['SqlCredential'] = $SqlCredential }
+							if ($AggressiveShrink) { $shrinkParams['Aggressive'] = $true }
+							$mod = Get-Module -Name sqmPartitionTool
+							& $mod { param($p) Invoke-sqmFileSpaceShrink @p } $shrinkParams | Out-Null
+						}
+						catch
+						{
+							# Shrink ist ein "Nice-to-have" fuer Plattenplatz, kein Abbruchgrund - das
+							# eigentliche Verschieben der Daten ist bereits sicher erfolgt.
+							Invoke-sqmLogging -Message "Shrink nach Segment $segmentsDone fehlgeschlagen (Umbau wird fortgesetzt): $($_.Exception.Message)" -FunctionName $functionName -Level "WARNING"
+						}
+					}
+				}
+			}
+
+			Invoke-sqmLogging -Message "Alle Segmente verschoben ($totalMoved Zeile(n) insgesamt) - '$Schema.$Table' ist jetzt leer." -FunctionName $functionName -Level "INFO"
+
+			# Swap: alte (jetzt leere) Tabelle beiseite, neue an ihre Stelle - analog -Method
+			# NewTableSwap (Original bleibt als "..._sqmPartOld" erhalten, kein automatisches Drop).
+			Invoke-DbaQuery @connParams -Query "EXEC sp_rename N'[$Schema].[$Table]', N'${Table}_sqmPartOld';" -ErrorAction Stop -EnableException
+			Invoke-DbaQuery @connParams -Query "EXEC sp_rename N'[$Schema].[$swapTable]', N'$Table';" -ErrorAction Stop -EnableException
+			Invoke-sqmLogging -Message "$applyAction - erfolgreich (BatchedSwap: '$Schema.$Table' -> '${Table}_sqmPartOld' [leer], '$swapTable' -> '$Schema.$Table')." -FunctionName $functionName -Level "INFO"
+		}
+		else
+		{
+			if ($ci)
+			{
+				$existingKeyCols = @($ci.KeyColumns -split ',')
+				$keyColsWithPartition = if ($PartitionColumn -in $existingKeyCols) { $existingKeyCols } else { $existingKeyCols + $PartitionColumn }
+				$keyColList = ($keyColsWithPartition | ForEach-Object { "[$_]" }) -join ', '
+
+				if (($ci.is_primary_key -or $ci.is_unique_constraint) -and $PartitionColumn -notin $existingKeyCols)
+				{
+					# PK/UNIQUE-Constraint muss neu definiert werden (DROP_EXISTING allein reicht hier nicht,
+					# die Constraint-Spaltenliste muss die Partitionsspalte mit enthalten).
+					$constraintType = if ($ci.is_primary_key) { 'PRIMARY KEY' } else { 'UNIQUE' }
+					$ddl = @"
 ALTER TABLE [$Schema].[$Table] DROP CONSTRAINT [$($ci.IndexName)];
 ALTER TABLE [$Schema].[$Table] ADD CONSTRAINT [$($ci.IndexName)] $constraintType CLUSTERED ($keyColList)
     ON [$($scheme.PartitionSchemeName)]([$PartitionColumn]);
 "@
-			}
-			else
-			{
-				$uniqueKw = if ($ci.is_unique) { 'UNIQUE ' } else { '' }
-				$ddl = @"
+				}
+				else
+				{
+					$uniqueKw = if ($ci.is_unique) { 'UNIQUE ' } else { '' }
+					$ddl = @"
 CREATE ${uniqueKw}CLUSTERED INDEX [$($ci.IndexName)]
     ON [$Schema].[$Table] ($keyColList)
     WITH (DROP_EXISTING = ON, ONLINE = $onlineClause)
     ON [$($scheme.PartitionSchemeName)]([$PartitionColumn]);
 "@
+				}
 			}
-		}
-		else
-		{
-			# Heap
-			if ($Method -eq 'NewTableSwap')
+			else
 			{
-				Invoke-sqmLogging -Message "-Method NewTableSwap fuer Heap '$Schema.$Table' - Basisvariante (Tabellenkopie ohne vollstaendige Constraint-/Trigger-/Berechtigungs-Uebernahme, fuer sehr grosse Heaps als Alternative zum direkten Index-Aufbau)." -FunctionName $functionName -Level "WARNING"
-				$tmpTable = "${Table}_sqmPartTmp"
-				$ddl = @"
+				# Heap
+				if ($Method -eq 'NewTableSwap')
+				{
+					Invoke-sqmLogging -Message "-Method NewTableSwap fuer Heap '$Schema.$Table' - Basisvariante (Tabellenkopie ohne vollstaendige Constraint-/Trigger-/Berechtigungs-Uebernahme, fuer sehr grosse Heaps als Alternative zum direkten Index-Aufbau)." -FunctionName $functionName -Level "WARNING"
+					$tmpTable = "${Table}_sqmPartTmp"
+					$ddl = @"
 SELECT * INTO [$Schema].[$tmpTable] FROM [$Schema].[$Table] WHERE 1 = 0;
 CREATE CLUSTERED INDEX [IX_${Table}_$PartitionColumn] ON [$Schema].[$tmpTable] ([$PartitionColumn])
     ON [$($scheme.PartitionSchemeName)]([$PartitionColumn]);
@@ -338,28 +548,29 @@ INSERT INTO [$Schema].[$tmpTable] WITH (TABLOCK) SELECT * FROM [$Schema].[$Table
 EXEC sp_rename N'[$Schema].[$Table]', N'${Table}_sqmPartOld';
 EXEC sp_rename N'[$Schema].[$tmpTable]', N'$Table';
 "@
-			}
-			else
-			{
-				$ddl = @"
+				}
+				else
+				{
+					$ddl = @"
 CREATE CLUSTERED INDEX [IX_${Table}_$PartitionColumn]
     ON [$Schema].[$Table] ([$PartitionColumn])
     WITH (ONLINE = $onlineClause)
     ON [$($scheme.PartitionSchemeName)]([$PartitionColumn]);
 "@
+				}
 			}
-		}
 
-		try
-		{
-			Invoke-DbaQuery @connParams -Query $ddl -ErrorAction Stop
-			Invoke-sqmLogging -Message "$applyAction - erfolgreich." -FunctionName $functionName -Level "INFO"
-		}
-		catch
-		{
-			$msg = "Fehler beim Umstellen von '$Schema.$Table' auf das Partition Scheme: $($_.Exception.Message)"
-			Invoke-sqmLogging -Message $msg -FunctionName $functionName -Level "ERROR"
-			throw
+			try
+			{
+				Invoke-DbaQuery @connParams -Query $ddl -ErrorAction Stop
+				Invoke-sqmLogging -Message "$applyAction - erfolgreich." -FunctionName $functionName -Level "INFO"
+			}
+			catch
+			{
+				$msg = "Fehler beim Umstellen von '$Schema.$Table' auf das Partition Scheme: $($_.Exception.Message)"
+				Invoke-sqmLogging -Message $msg -FunctionName $functionName -Level "ERROR"
+				throw
+			}
 		}
 
 		# =========================================================================================
