@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Migriert eine noch nicht partitionierte, aktive Tabelle monatsweise in eine partitionierte Kopie in einer Archiv-Datenbank.
 
