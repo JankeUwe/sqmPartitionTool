@@ -301,8 +301,14 @@ function Invoke-sqmPartitionArchive
 		}
 
 		# MERGE RANGE braucht die OBERE Grenze der entfernten Partition (= die Boundary, die zwischen
-		# ihr und der naechsten Partition entfernt werden soll), NICHT ihre untere Grenze.
-		$mergeDdl = "ALTER PARTITION FUNCTION [$($status[0].PartitionFunctionName)]() MERGE RANGE ($($(if ($targetPartition.UpperBoundaryValue -is [datetime]) { "'$($targetPartition.UpperBoundaryValue.ToString('yyyy-MM-dd'))'" } else { $targetPartition.UpperBoundaryValue })));"
+		# ihr und der naechsten Partition entfernt werden soll), NICHT ihre untere Grenze. Ein
+		# [string]-Boundary-Wert (BoundaryType 'Text', SQL_VARIANT liefert dann einen .NET-String)
+		# muss als N'...'-Literal gequotet werden, statt sich auf implizite int->varchar-Konvertierung
+		# zu verlassen (analog zur BoundaryValue-Formatierung in New-sqmPartitionSchemeSet.ps1).
+		$upperBoundaryLiteral = if ($targetPartition.UpperBoundaryValue -is [datetime]) { "'$($targetPartition.UpperBoundaryValue.ToString('yyyy-MM-dd'))'" }
+		elseif ($targetPartition.UpperBoundaryValue -is [string]) { "N'$($targetPartition.UpperBoundaryValue.Replace("'", "''"))'" }
+		else { "$($targetPartition.UpperBoundaryValue)" }
+		$mergeDdl = "ALTER PARTITION FUNCTION [$($status[0].PartitionFunctionName)]() MERGE RANGE ($upperBoundaryLiteral);"
 		Invoke-DbaQuery @connParams -Query $mergeDdl -ErrorAction Stop -EnableException
 		Invoke-sqmLogging -Message "MERGE RANGE fuer Partition $PartitionNumber abgeschlossen." -FunctionName $functionName -Level "INFO"
 

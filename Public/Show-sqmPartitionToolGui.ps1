@@ -112,6 +112,7 @@
         IsEmpty             = $false
         Granularity         = 'Month'
         BoundaryType        = 'Date'
+        SurrogateDateFormat = 'yyyyMMdd'
         FilegroupStrategy   = 'Single'
         FutureBufferPeriods = 3
         AllowKeyChange      = $false
@@ -569,10 +570,29 @@
     $lbl4Warn.ForeColor = $cWarn
     $lbl4Warn.Text = ''
 
+    # Nur sichtbar, wenn die Partitionsspalte kein echter Datumstyp ist (Int-/Text-Surrogatschluessel,
+    # z.B. YYYYMMDD oder YYYYMM als int/varchar) - siehe Confirm-StepAndAdvance Case 3.
+    $lbl4d = New-Object System.Windows.Forms.Label
+    $lbl4d.Text = 'Surrogate Date Format:'
+    $lbl4d.Location = New-Object System.Drawing.Point(4, 182)
+    $lbl4d.AutoSize = $true
+    $lbl4d.ForeColor = $cDim
+    $lbl4d.Visible = $false
+    $cmb4Fmt = New-Object System.Windows.Forms.ComboBox
+    $cmb4Fmt.Location = New-Object System.Drawing.Point(140, 178)
+    $cmb4Fmt.Size = New-Object System.Drawing.Size(150, 24)
+    $cmb4Fmt.BackColor = $cWindow
+    $cmb4Fmt.ForeColor = $cText
+    $cmb4Fmt.DropDownStyle = 'DropDownList'
+    [void]$cmb4Fmt.Items.AddRange(@('yyyyMMdd (day)', 'yyyyMM (month)'))
+    $cmb4Fmt.SelectedIndex = 0
+    $cmb4Fmt.Visible = $false
+
     $p4.Controls.Add($lbl4a); $p4.Controls.Add($cmb4Gran)
     $p4.Controls.Add($lbl4b); $p4.Controls.Add($cmb4Fg)
     $p4.Controls.Add($lbl4c); $p4.Controls.Add($num4Buffer)
     $p4.Controls.Add($lbl4Warn)
+    $p4.Controls.Add($lbl4d); $p4.Controls.Add($cmb4Fmt)
 
     function Update-Step4Warning
     {
@@ -623,12 +643,15 @@
             $script:wiz.Granularity = [string]$cmb4Gran.SelectedItem
             $script:wiz.FilegroupStrategy = if ($cmb4Fg.SelectedIndex -eq 1) { 'PerPeriod' } else { 'Single' }
             $script:wiz.FutureBufferPeriods = [int]$num4Buffer.Value
-            $script:wiz.BoundaryType = if ($script:wiz.DataType -in @('date', 'datetime', 'datetime2', 'smalldatetime', 'datetimeoffset')) { 'Date' } else { 'Int' }
+            $dateTypesGui = @('date', 'datetime', 'datetime2', 'smalldatetime', 'datetimeoffset')
+            $textTypesGui = @('char', 'varchar', 'nchar', 'nvarchar')
+            $script:wiz.BoundaryType = if ($script:wiz.DataType -in $dateTypesGui) { 'Date' } elseif ($script:wiz.DataType -in $textTypesGui) { 'Text' } else { 'Int' }
+            $script:wiz.SurrogateDateFormat = if ($cmb4Fmt.SelectedIndex -eq 1) { 'yyyyMM' } else { 'yyyyMMdd' }
 
             $minV = if ($script:wiz.IsEmpty) { $txt3Start.Text.Trim() } else { $script:wiz.MinValue }
             $maxV = if ($script:wiz.IsEmpty) { $(if ($txt3End.Text.Trim()) { $txt3End.Text.Trim() } else { $txt3Start.Text.Trim() }) } else { $script:wiz.MaxValue }
 
-            $boundaries = Get-sqmPartitionBoundaryList -MinValue $minV -MaxValue $maxV -Granularity $script:wiz.Granularity -BoundaryType $script:wiz.BoundaryType -FutureBufferPeriods $script:wiz.FutureBufferPeriods -ErrorAction Stop
+            $boundaries = Get-sqmPartitionBoundaryList -MinValue $minV -MaxValue $maxV -Granularity $script:wiz.Granularity -BoundaryType $script:wiz.BoundaryType -SurrogateDateFormat $script:wiz.SurrogateDateFormat -FutureBufferPeriods $script:wiz.FutureBufferPeriods -ErrorAction Stop
             $script:wiz.Boundaries = $boundaries
             foreach ($b in $boundaries)
             {
@@ -869,7 +892,8 @@ ORDER BY ic.key_ordinal
         $lines.Add("Database             : $($script:wiz.Database)")
         $lines.Add("Table                : $($script:wiz.SchemaName).$($script:wiz.TableName) ($(if ($script:wiz.IsHeap) { 'Heap' } else { 'Clustered' }))")
         $lines.Add("Partition Column     : $($script:wiz.PartitionColumn) ($($script:wiz.DataType))")
-        $lines.Add("Granularity          : $($script:wiz.Granularity) | BoundaryType: $($script:wiz.BoundaryType)")
+        $lines.Add("Granularity          : $($script:wiz.Granularity) | BoundaryType: $($script:wiz.BoundaryType)" +
+            $(if ($script:wiz.BoundaryType -ne 'Date') { " | SurrogateDateFormat: $($script:wiz.SurrogateDateFormat)" } else { '' }))
         $lines.Add("Filegroup Strategy   : $($script:wiz.FilegroupStrategy) | Future Buffer: $($script:wiz.FutureBufferPeriods) period(s)")
         if ($chk6MigrateNow.Checked)
         {
@@ -939,7 +963,7 @@ ORDER BY ic.key_ordinal
                     ErrorAction             = 'Stop'
                     EnableException         = $true
                 }
-                if ($script:wiz.BoundaryType) { $archParams['BoundaryType'] = $script:wiz.BoundaryType }
+                if ($script:wiz.BoundaryType) { $archParams['BoundaryType'] = $script:wiz.BoundaryType; $archParams['SurrogateDateFormat'] = $script:wiz.SurrogateDateFormat }
                 if ($clb6Key.Visible -and $clb6Key.CheckedItems.Count -gt 0)
                 {
                     $archParams['KeyColumn'] = @($clb6Key.CheckedItems | ForEach-Object { $_ })
@@ -986,6 +1010,7 @@ ORDER BY ic.key_ordinal
                 PartitionColumn     = $script:wiz.PartitionColumn
                 Granularity         = $script:wiz.Granularity
                 BoundaryType        = $script:wiz.BoundaryType
+                SurrogateDateFormat = $script:wiz.SurrogateDateFormat
                 FilegroupStrategy   = $script:wiz.FilegroupStrategy
                 FutureBufferPeriods = $script:wiz.FutureBufferPeriods
                 AllowKeyChange      = $true
@@ -1014,6 +1039,7 @@ ORDER BY ic.key_ordinal
                     PartitionSchemeName   = $result.PartitionSchemeName
                     Granularity           = $script:wiz.Granularity
                     BoundaryType          = $script:wiz.BoundaryType
+                    SurrogateDateFormat   = $script:wiz.SurrogateDateFormat
                     FilegroupStrategy     = $script:wiz.FilegroupStrategy
                     RetentionValue        = [int]$num6Retention.Value
                     RetentionUnit         = [string]$cmb6Unit.SelectedItem
@@ -1109,6 +1135,9 @@ ORDER BY ic.key_ordinal
                 if ($script:wiz.SuggestedGranularity) { $cmb4Gran.SelectedItem = $script:wiz.SuggestedGranularity }
                 elseif (-not $cmb4Gran.SelectedItem) { $cmb4Gran.SelectedIndex = 0 }
                 Update-Step4Warning
+                $isDateCol = $script:wiz.DataType -in @('date', 'datetime', 'datetime2', 'smalldatetime', 'datetimeoffset')
+                $lbl4d.Visible = -not $isDateCol
+                $cmb4Fmt.Visible = -not $isDateCol
                 return $true
             }
             4 { Load-Step5; return $true }

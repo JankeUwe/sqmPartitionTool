@@ -63,11 +63,15 @@ CREATE OR ALTER PROCEDURE dbo.sqm_ArchiveMonthBatch
     @ArchiveSchemaName   SYSNAME,
     @ArchiveTableName    SYSNAME,
     @BatchSize           INT = 50000,
-    -- Date (echtes DATE/DATETIME), Int (YYYYMMDD als Ganzzahl, z.B. CARCHIVE.VTDAT) oder Varchar
-    -- (YYYYMMDD als String) - steuert, in welcher Form die Periodengrenzen mit @DateColumn
-    -- verglichen werden (siehe Schritt 1 unten). Gleiche Konvention wie BoundaryType in
+    -- Date (echtes DATE/DATETIME), Int (numerischer Surrogatschluessel, z.B. CARCHIVE.VTDAT) oder
+    -- Text (char/varchar-Surrogatschluessel mit demselben Zahlenformat als String) - steuert, in
+    -- welcher Form die Periodengrenzen mit @DateColumn verglichen werden (siehe Schritt 1 unten).
+    -- Gleiche Konvention wie BoundaryType in
     -- Invoke-sqmTablePartitionConversion/Get-sqmPartitionBoundaryList.
     @BoundaryType        VARCHAR(10) = N'Date',
+    -- Nur relevant bei @BoundaryType Int/Text: 'yyyyMMdd' (Standard, Tagesgenauigkeit) oder
+    -- 'yyyyMM' (Monatsgenauigkeit ohne Tag).
+    @SurrogateDateFormat VARCHAR(10) = N'yyyyMMdd',
     @RowsThisCall        BIGINT OUTPUT,
     @MonthComplete       BIT OUTPUT
 AS
@@ -84,9 +88,15 @@ BEGIN
         RETURN;
     END
 
-    IF @BoundaryType NOT IN (N'Date', N'Int', N'Varchar')
+    IF @BoundaryType NOT IN (N'Date', N'Int', N'Text')
     BEGIN
-        RAISERROR(N'sqm_ArchiveMonthBatch: @BoundaryType muss Date, Int oder Varchar sein (erhalten: %s).', 16, 1, @BoundaryType);
+        RAISERROR(N'sqm_ArchiveMonthBatch: @BoundaryType muss Date, Int oder Text sein (erhalten: %s).', 16, 1, @BoundaryType);
+        RETURN;
+    END
+
+    IF @SurrogateDateFormat NOT IN (N'yyyyMMdd', N'yyyyMM')
+    BEGIN
+        RAISERROR(N'sqm_ArchiveMonthBatch: @SurrogateDateFormat muss yyyyMMdd oder yyyyMM sein (erhalten: %s).', 16, 1, @SurrogateDateFormat);
         RETURN;
     END
 
@@ -107,13 +117,13 @@ BEGIN
     DECLARE @pPeriodStartVal SQL_VARIANT, @pPeriodEndVal SQL_VARIANT;
     IF @BoundaryType = N'Int'
     BEGIN
-        SET @pPeriodStartVal = CAST(CONVERT(INT, CONVERT(VARCHAR(8), @PeriodStart, 112)) AS SQL_VARIANT);
-        SET @pPeriodEndVal   = CAST(CONVERT(INT, CONVERT(VARCHAR(8), @PeriodEnd, 112)) AS SQL_VARIANT);
+        SET @pPeriodStartVal = CAST(CONVERT(BIGINT, FORMAT(@PeriodStart, @SurrogateDateFormat)) AS SQL_VARIANT);
+        SET @pPeriodEndVal   = CAST(CONVERT(BIGINT, FORMAT(@PeriodEnd, @SurrogateDateFormat)) AS SQL_VARIANT);
     END
-    ELSE IF @BoundaryType = N'Varchar'
+    ELSE IF @BoundaryType = N'Text'
     BEGIN
-        SET @pPeriodStartVal = CAST(CONVERT(VARCHAR(8), @PeriodStart, 112) AS SQL_VARIANT);
-        SET @pPeriodEndVal   = CAST(CONVERT(VARCHAR(8), @PeriodEnd, 112) AS SQL_VARIANT);
+        SET @pPeriodStartVal = CAST(FORMAT(@PeriodStart, @SurrogateDateFormat) AS SQL_VARIANT);
+        SET @pPeriodEndVal   = CAST(FORMAT(@PeriodEnd, @SurrogateDateFormat) AS SQL_VARIANT);
     END
     ELSE
     BEGIN

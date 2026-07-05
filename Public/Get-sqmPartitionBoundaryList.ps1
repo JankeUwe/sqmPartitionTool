@@ -25,9 +25,15 @@
     Month, Quarter oder Year.
 
 .PARAMETER BoundaryType
-    Date (echte date/datetime2-Spalte), Int (Surrogatschluessel im Format YYYYMMDD, z.B. 20240115)
-    oder Varchar (VARCHAR/NVARCHAR mit YYYYMMDD-String-Format, z.B. '20240115'). Bei Int werden
-    MinValue/MaxValue als YYYYMMDD-Ganzzahl erwartet/zurueckgegeben, bei Varchar als String.
+    Date (echte date/datetime2-Spalte), Int (numerischer Surrogatschluessel, z.B. 20240115 oder
+    202401) oder Text (char/varchar-Surrogatschluessel mit demselben Zahlenformat als String, z.B.
+    '20240115' oder '202401'). Bei Int/Text werden MinValue/MaxValue im per -SurrogateDateFormat
+    angegebenen Format erwartet/zurueckgegeben.
+
+.PARAMETER SurrogateDateFormat
+    Nur relevant bei BoundaryType Int oder Text: Format des Datums-Surrogatschluessels.
+    'yyyyMMdd' (Standard, Tagesgenauigkeit, z.B. 20240115) oder 'yyyyMM' (Monatsgenauigkeit ohne
+    Tag, z.B. 202401 - typisch wenn die Quellspalte selbst nur auf Monatsebene gefuehrt wird).
 
 .PARAMETER FutureBufferPeriods
     Anzahl zusaetzlicher, leerer Perioden nach der letzten Datenperiode. Standard: 3.
@@ -39,7 +45,8 @@
     Get-sqmPartitionBoundaryList -MinValue 20230115 -MaxValue 20241103 -Granularity Quarter -BoundaryType Int -FutureBufferPeriods 2
 
 .EXAMPLE
-    Get-sqmPartitionBoundaryList -MinValue '20230115' -MaxValue '20241103' -Granularity Month -BoundaryType Varchar
+    # Varchar-Surrogatschluessel im YYYYMM-Format (nur Monatsgenauigkeit)
+    Get-sqmPartitionBoundaryList -MinValue '202301' -MaxValue '202411' -Granularity Month -BoundaryType Text -SurrogateDateFormat yyyyMM
 
 .NOTES
     Keine Datenbankabhaengigkeit - reine Berechnungsfunktion, primäres Ziel für Unit-Tests.
@@ -60,19 +67,23 @@ function Get-sqmPartitionBoundaryList
 		[string]$Granularity,
 
 		[Parameter(Mandatory = $true)]
-		[ValidateSet('Date', 'Int', 'Varchar')]
+		[ValidateSet('Date', 'Int', 'Text')]
 		[string]$BoundaryType,
+
+		[Parameter(Mandatory = $false)]
+		[ValidateSet('yyyyMMdd', 'yyyyMM')]
+		[string]$SurrogateDateFormat = 'yyyyMMdd',
 
 		[Parameter(Mandatory = $false)]
 		[ValidateRange(0, 60)]
 		[int]$FutureBufferPeriods = 3
 	)
 
-	function _ToDateTime($value, [string]$boundaryType)
+	function _ToDateTime($value, [string]$boundaryType, [string]$dateFormat)
 	{
-		if ($boundaryType -in @('Int', 'Varchar'))
+		if ($boundaryType -in @('Int', 'Text'))
 		{
-			return [datetime]::ParseExact([string]$value, 'yyyyMMdd', $null)
+			return [datetime]::ParseExact([string]$value, $dateFormat, $null)
 		}
 		return [datetime]$value
 	}
@@ -111,8 +122,8 @@ function Get-sqmPartitionBoundaryList
 		}
 	}
 
-	$minDate = _ToDateTime $MinValue $BoundaryType
-	$maxDate = _ToDateTime $MaxValue $BoundaryType
+	$minDate = _ToDateTime $MinValue $BoundaryType $SurrogateDateFormat
+	$maxDate = _ToDateTime $MaxValue $BoundaryType $SurrogateDateFormat
 
 	if ($maxDate -lt $minDate)
 	{
@@ -142,9 +153,9 @@ function Get-sqmPartitionBoundaryList
 	{
 		$boundaryValue = switch ($BoundaryType)
 		{
-			'Int'     { [int]$pd.ToString('yyyyMMdd') }
-			'Varchar' { $pd.ToString('yyyyMMdd') }
-			default   { $pd }
+			'Int'  { [int64]$pd.ToString($SurrogateDateFormat) }
+			'Text' { $pd.ToString($SurrogateDateFormat) }
+			default { $pd }
 		}
 		[PSCustomObject]@{
 			PeriodIndex   = $index

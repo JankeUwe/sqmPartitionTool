@@ -86,10 +86,14 @@
 .PARAMETER FutureBufferPeriods
     Durchgereicht an Invoke-sqmTablePartitionConversion. Standard: 3.
 .PARAMETER BoundaryType
-    Date (echtes DATE/DATETIME), Int (YYYYMMDD als Ganzzahl, z.B. CORO_DB.dbo.CARCHIVE.VTDAT) oder
-    Varchar (YYYYMMDD als String). Steuert sowohl die Perioden-Erkennung/-Grenzen dieser Funktion
-    als auch (durchgereicht) Invoke-sqmTablePartitionConversion fuer die Archiv-Kopie. Ohne Angabe
-    automatische Ableitung aus dem SQL-Spaltentyp von DateColumn.
+    Date (echtes DATE/DATETIME), Int (numerischer Surrogatschluessel, z.B. CORO_DB.dbo.CARCHIVE.VTDAT)
+    oder Text (char/varchar-Surrogatschluessel mit demselben Zahlenformat als String). Steuert sowohl
+    die Perioden-Erkennung/-Grenzen dieser Funktion als auch (durchgereicht)
+    Invoke-sqmTablePartitionConversion fuer die Archiv-Kopie. Ohne Angabe automatische Ableitung aus
+    dem SQL-Spaltentyp von DateColumn. Gleiche Konvention wie Invoke-sqmTablePartitionConversion.
+.PARAMETER SurrogateDateFormat
+    Nur relevant bei BoundaryType Int oder Text: 'yyyyMMdd' (Standard, Tagesgenauigkeit) oder
+    'yyyyMM' (Monatsgenauigkeit ohne Tag).
 .PARAMETER AllowKeyChange
     Durchgereicht an Invoke-sqmTablePartitionConversion.
 .PARAMETER Method
@@ -210,8 +214,12 @@ function Invoke-sqmTableArchiveMigration
 		[int]$FutureBufferPeriods = 3,
 
 		[Parameter(Mandatory = $false)]
-		[ValidateSet('Date', 'Int', 'Varchar')]
+		[ValidateSet('Date', 'Int', 'Text')]
 		[string]$BoundaryType,
+
+		[Parameter(Mandatory = $false)]
+		[ValidateSet('yyyyMMdd', 'yyyyMM')]
+		[string]$SurrogateDateFormat = 'yyyyMMdd',
 
 		[Parameter(Mandatory = $false)]
 		[switch]$AllowKeyChange,
@@ -381,9 +389,9 @@ WHERE i.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND c.name = N'$DateColumn'
 		# ---------------------------------------------------------------------------------------
 		# 1c. BoundaryType von $DateColumn ermitteln (falls nicht angegeben) - gleiche Herleitung
 		#     wie Invoke-sqmTablePartitionConversion.ps1 (Date/Datetime-Typen -> 'Date',
-		#     Varchar/Nvarchar/Char/Nchar -> 'Varchar' [YYYYMMDD-String], sonst -> 'Int'
-		#     [YYYYMMDD als Ganzzahl, z.B. CORO_DB.dbo.CARCHIVE.VTDAT]). Noetig, weil sowohl die
-		#     Start/EndPeriod-Ableitung aus dem Quellwertebereich als auch die an
+		#     Char/Varchar/Nchar/Nvarchar -> 'Text' [Surrogat im -SurrogateDateFormat als String],
+		#     sonst -> 'Int' [Surrogat als Ganzzahl, z.B. CORO_DB.dbo.CARCHIVE.VTDAT]). Noetig, weil
+		#     sowohl die Start/EndPeriod-Ableitung aus dem Quellwertebereich als auch die an
 		#     sqm_ArchiveMonthBatch uebergebenen Periodengrenzen sonst blind einen echten
 		#     DATE/DATETIME-Typ voraussetzen wuerden - schlaegt bei einem YYYYMMDD-Surrogat wie
 		#     VTDAT sonst mit "date ist inkompatibel mit int" fehl (live gegen CARCHIVE bestaetigt).
@@ -396,9 +404,9 @@ WHERE i.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND c.name = N'$DateColumn'
 		if (-not $BoundaryType)
 		{
 			$dateTypes = @('date', 'datetime', 'datetime2', 'smalldatetime', 'datetimeoffset')
-			$varcharTypes = @('varchar', 'nvarchar', 'char', 'nchar')
-			$BoundaryType = if ($dateColTypeName -in $dateTypes) { 'Date' } elseif ($dateColTypeName -in $varcharTypes) { 'Varchar' } else { 'Int' }
-			Invoke-sqmLogging -Message "BoundaryType nicht angegeben - aus Spaltentyp '$dateColTypeName' von '$DateColumn' abgeleitet: $BoundaryType." -FunctionName $functionName -Level "INFO"
+			$textTypes = @('varchar', 'nvarchar', 'char', 'nchar')
+			$BoundaryType = if ($dateColTypeName -in $dateTypes) { 'Date' } elseif ($dateColTypeName -in $textTypes) { 'Text' } else { 'Int' }
+			Invoke-sqmLogging -Message "BoundaryType nicht angegeben - aus Spaltentyp '$dateColTypeName' von '$DateColumn' abgeleitet: $BoundaryType (SurrogateDateFormat: $SurrogateDateFormat)." -FunctionName $functionName -Level "INFO"
 		}
 
 		# =========================================================================================
@@ -439,10 +447,10 @@ WHERE i.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND c.name = N'$DateColumn'
 		}
 		else
 		{
-			# Bei Int/Varchar wird MinValue als YYYYMMDD-Surrogat interpretiert (siehe BoundaryType-
+			# Bei Int/Text wird MinValue im -SurrogateDateFormat interpretiert (siehe BoundaryType-
 			# Herleitung oben) statt direkt als [datetime] gecastet zu werden - Letzteres schlaegt fuer
 			# einen rohen Ganzzahlwert wie 20240101 fehl ("nicht als DateTime erkannt").
-			$minValDt = if ($BoundaryType -in @('Int', 'Varchar')) { [datetime]::ParseExact([string]$srcRange.MinValue, 'yyyyMMdd', $null) } else { [datetime]$srcRange.MinValue }
+			$minValDt = if ($BoundaryType -in @('Int', 'Text')) { [datetime]::ParseExact([string]$srcRange.MinValue, $SurrogateDateFormat, $null) } else { [datetime]$srcRange.MinValue }
 			if (-not $StartPeriod) { $StartPeriod = [int]$minValDt.ToString('yyyyMM') }
 			if (-not $EndPeriod) { $EndPeriod = [int](Get-Date).AddMonths(-1).ToString('yyyyMM') }
 		}
@@ -509,7 +517,7 @@ WHERE i.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND c.name = N'$DateColumn'
 				Confirm             = $false
 				EnableException     = $true
 			}
-			if ($BoundaryType) { $convParams['BoundaryType'] = $BoundaryType }
+			if ($BoundaryType) { $convParams['BoundaryType'] = $BoundaryType; $convParams['SurrogateDateFormat'] = $SurrogateDateFormat }
 			if ($AllowKeyChange) { $convParams['AllowKeyChange'] = $true }
 			if ($Online) { $convParams['Online'] = $true }
 			if ($SqlCredential) { $convParams['SqlCredential'] = $SqlCredential }
@@ -568,7 +576,8 @@ WHERE i.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND c.name = N'$DateColumn'
 DECLARE @RowsThisCall BIGINT, @MonthComplete BIT;
 EXEC dbo.sqm_ArchiveMonthBatch
     @SchemaName = N'$Schema', @TableName = N'$Table', @DateColumn = N'$DateColumn', @KeyColumns = N'$keyColumnsCsv',
-    @YYYYMM = $period, @BoundaryType = N'$BoundaryType', @ArchiveDatabaseName = N'$ArchiveDatabaseName', @ArchiveSchemaName = N'$ArchiveSchemaName',
+    @YYYYMM = $period, @BoundaryType = N'$BoundaryType', @SurrogateDateFormat = N'$SurrogateDateFormat',
+    @ArchiveDatabaseName = N'$ArchiveDatabaseName', @ArchiveSchemaName = N'$ArchiveSchemaName',
     @ArchiveTableName = N'$Table', @BatchSize = $BatchSize,
     @RowsThisCall = @RowsThisCall OUTPUT, @MonthComplete = @MonthComplete OUTPUT;
 SELECT @RowsThisCall AS RowsThisCall, @MonthComplete AS MonthComplete;
@@ -592,11 +601,12 @@ SELECT @RowsThisCall AS RowsThisCall, @MonthComplete AS MonthComplete;
 			{
 				$periodStartDate = [datetime]::ParseExact("$($period)01", 'yyyyMMdd', $null)
 				$periodEndDate = $periodStartDate.AddMonths(1)
-				# Literal je nach BoundaryType passend formatieren (Int: unquotierte YYYYMMDD-Zahl,
-				# Varchar: quotierter YYYYMMDD-String, Date: quotiertes ISO-Datum) - dieselbe
-				# YYYYMMDD-Konvention wie Get-sqmPartitionBoundaryList/Invoke-sqmTablePartitionConversion.
-				$periodStartLit = switch ($BoundaryType) { 'Int' { [int]$periodStartDate.ToString('yyyyMMdd') }; 'Varchar' { "'$($periodStartDate.ToString('yyyyMMdd'))'" }; default { "'$($periodStartDate.ToString('yyyy-MM-dd'))'" } }
-				$periodEndLit = switch ($BoundaryType) { 'Int' { [int]$periodEndDate.ToString('yyyyMMdd') }; 'Varchar' { "'$($periodEndDate.ToString('yyyyMMdd'))'" }; default { "'$($periodEndDate.ToString('yyyy-MM-dd'))'" } }
+				# Literal je nach BoundaryType passend formatieren (Int: unquotierte Zahl im
+				# -SurrogateDateFormat, Text: quotierter String im -SurrogateDateFormat, Date:
+				# quotiertes ISO-Datum) - dieselbe Konvention wie
+				# Get-sqmPartitionBoundaryList/Invoke-sqmTablePartitionConversion.
+				$periodStartLit = switch ($BoundaryType) { 'Int' { [int64]$periodStartDate.ToString($SurrogateDateFormat) }; 'Text' { "'$($periodStartDate.ToString($SurrogateDateFormat))'" }; default { "'$($periodStartDate.ToString('yyyy-MM-dd'))'" } }
+				$periodEndLit = switch ($BoundaryType) { 'Int' { [int64]$periodEndDate.ToString($SurrogateDateFormat) }; 'Text' { "'$($periodEndDate.ToString($SurrogateDateFormat))'" }; default { "'$($periodEndDate.ToString('yyyy-MM-dd'))'" } }
 
 				$loggedRows = [int64](Invoke-DbaQuery @connParams -Database $Database -Query "SELECT RowsArchived FROM dbo.sqm_ArchiveMonthLog WHERE SchemaName = N'$Schema' AND TableName = N'$Table' AND ArchiveDatabaseName = N'$ArchiveDatabaseName' AND YYYYMM = $period;" -ErrorAction Stop -EnableException).RowsArchived
 				$sourceRowsNow = [int64](Invoke-DbaQuery @connParams -Database $Database -Query "SELECT COUNT(*) AS Cnt FROM [$Schema].[$Table] WHERE [$DateColumn] >= $periodStartLit AND [$DateColumn] < $periodEndLit;" -ErrorAction Stop -EnableException).Cnt

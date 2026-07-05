@@ -1,5 +1,26 @@
 # sqmPartitionTool — Changelog
 
+## [1.7.0.0] — 2026-07-06
+
+### Zusammenfuehrung zweier parallel entwickelter Aenderungsstraenge (DEV02/DEV03)
+
+Waehrend an diesem Rechner (DEV03, komplett neu aufgesetzt) an `Invoke-sqmTableArchiveMigration`
+gearbeitet wurde, war auf DEV02 (mittlerweile ausgefallen) unabhaengig voneinander bereits
+`BoundaryType 'Text'` + `-SurrogateDateFormat` fuer die Partitionierungsseite entwickelt und
+gepusht worden - beide Seiten loesten dasselbe Problem (VARCHAR/CHAR-Surrogatschluessel-Spalten)
+mit unterschiedlichem Namen (`Varchar` vs. `Text`) und unterschiedlichem Funktionsumfang (DEV03:
+nur YYYYMMDD; DEV02: konfigurierbar YYYYMMDD/YYYYMM, zusaetzlich bis in `sqm_ExtendPartitionWindow`
+und den Retention-Sweep-Job durchgezogen).
+
+- Der DEV02-Entwurf (`Text`/`-SurrogateDateFormat`) ist der vollstaendigere und wird als kanonisch
+  uebernommen. `Invoke-sqmTableArchiveMigration` und `sqm_ArchiveMonthBatch` (bislang `Varchar`,
+  nur YYYYMMDD) sind entsprechend auf `Text` + `-SurrogateDateFormat` umgestellt worden, damit es
+  im gesamten Modul nur noch EIN Namensschema fuer Datums-Surrogatschluessel gibt.
+- Kein Funktionsverlust auf beiden Seiten: die auf DEV03 entwickelten Faehigkeiten (zusammengesetzte
+  Schluessel, Cutover-View, Write-Progress, `-Method BatchedSwap`, GUI-Ueberarbeitung) und die auf
+  DEV02 entwickelten (`Text`/`SurrogateDateFormat` durchgaengig bis Extend/Retention) sind beide
+  vollstaendig erhalten.
+
 ## [1.6.6.0] — 2026-07-06
 
 ### `Invoke-sqmTableArchiveMigration`: sichtbarer Fortschritt (Write-Progress + Konsolenausgabe)
@@ -310,16 +331,60 @@ in eine separate, vom Admin bereits angelegte Archiv-Datenbank ueberfuehrt wird 
 - Loeschen der Quelldaten ist bewusst NICHT Teil dieser Funktion - das bleibt eine spaetere,
   manuelle Admin-Entscheidung nach vollstaendigem Abschluss der Migration.
 
-## [1.4.0.0] — 2026-07-04
+## [1.4.1.0] — 2026-07-04
 
-### VARCHAR-Support für YYYYMMDD-Format
+### Text-Support für YYYYMMDD-Format (DEV03-Seitig, spaeter durch [1.4.0.0]/DEV02 ersetzt)
 
-- **`Get-sqmPartitionBoundaryList`**: Neuer BoundaryType `Varchar` für VARCHAR/NVARCHAR-Spalten mit
+- **`Get-sqmPartitionBoundaryList`**: Neuer BoundaryType `Text` für VARCHAR/NVARCHAR-Spalten mit
   YYYYMMDD-String-Format (z.B. '20240115'). Liefert Boundaries als Strings statt als Int/DateTime.
 - **`Invoke-sqmTablePartitionConversion`**: Validierung und automatische Typ-Erkennung erweitert
-  (varchar/nvarchar -> BoundaryType 'Varchar'). Warnung, wenn BoundaryType nicht zum Spaltentyp passt.
+  (varchar/nvarchar -> BoundaryType 'Text'). Warnung, wenn BoundaryType nicht zum Spaltentyp passt.
 - **`Register-sqmPartitionTable`**: BoundaryType-Parameter aktualisiert.
-- **Alle Funktionen**: Vollständig getestet auf DEV03 mit Varchar/Int/Date-Beispielen.
+- **Alle Funktionen**: Vollständig getestet auf DEV03 mit Text/Int/Date-Beispielen.
+- Unabhaengig von [1.4.0.0] (DEV02) entstanden, bevor beide Aenderungsstraenge zusammengefuehrt
+  wurden (siehe [1.7.0.0]) - deckte nur YYYYMMDD ab, kein konfigurierbares `-SurrogateDateFormat`.
+
+## [1.4.0.0] — 2026-07-03
+
+### Varchar-Surrogatschluessel (BoundaryType 'Text') + konfigurierbares yyyyMM-Format
+
+- Bisher deckte `BoundaryType 'Int'` nur numerische YYYYMMDD-Surrogatschluessel ab. Manche Projekte
+  fuehren dasselbe Datumsformat aber als `char`/`varchar`-Spalte, und/oder nur auf Monatsebene
+  (YYYYMM statt YYYYMMDD). Beides wird jetzt unterstuetzt:
+  - Neuer `BoundaryType`-Wert `'Text'` (zusaetzlich zu `'Date'`/`'Int'`) fuer
+    `char`/`varchar`/`nchar`/`nvarchar`-Surrogatschluessel.
+  - Neuer Parameter `-SurrogateDateFormat` (`'yyyyMMdd'` Standard oder `'yyyyMM'`) fuer
+    `Get-sqmPartitionBoundaryList`, `Invoke-sqmTablePartitionConversion` und
+    `Register-sqmPartitionTable` - steuert, ob der Surrogatschluessel Tages- oder nur
+    Monatsgenauigkeit hat.
+  - `Invoke-sqmTablePartitionConversion` erkennt `BoundaryType` weiterhin automatisch aus dem
+    Spaltentyp, wenn nicht angegeben: Datumstypen -> `Date`, `int`/`bigint`/`smallint`/`tinyint` ->
+    `Int`, `char`/`varchar`/`nchar`/`nvarchar` -> `Text`. Der `SqlDataType`, der in die
+    `CREATE PARTITION FUNCTION`-DDL einfliesst, wird fuer Text-Typen jetzt mit der tatsaechlichen
+    Spaltenlaenge gebildet (z.B. `varchar(6)`), vorher waere ein unlaengenspezifiziertes `varchar`
+    (implizit `varchar(1)`) verwendet worden.
+  - `New-sqmPartitionSchemeSet` quotet `[string]`-Boundary-Werte jetzt als `N'...'`-Literale in der
+    `CREATE PARTITION FUNCTION ... VALUES (...)`-DDL.
+  - `sqm_ExtendPartitionWindow` (T-SQL-Wartungsprozedur): liest `SurrogateDateFormat` jetzt aus der
+    Registry und parst/erzeugt Boundary-Werte format- und typabhaengig (yyyyMM hat keinen passenden
+    `CONVERT`-Style und wird manuell aus Jahr/Monat zusammengesetzt; `Text`-Literale werden gequotet,
+    `Int`-Literale nicht).
+  - `Invoke-sqmPartitionRetentionSweep.ps1` (Retention-Job): der Cutoff-Vergleich castete den rohen
+    Boundary-Wert bisher blind als `[datetime]` - das war fuer `BoundaryType 'Date'` korrekt, fuer
+    `'Int'`/`'Text'` aber ein Fehlcast (ein Wert wie `20240115` als `[datetime]` interpretiert landet
+    als OLE-Automation-Datumsserial, nicht als 15.01.2024). Parst jetzt formatabhaengig ueber
+    `[datetime]::ParseExact`.
+  - `Invoke-sqmPartitionArchive` (`MERGE RANGE`-DDL): `[string]`-Boundary-Werte werden jetzt als
+    `N'...'`-Literal gequotet statt sich auf implizite int->varchar-Konvertierung zu verlassen.
+  - `Show-sqmPartitionToolGui`: Schritt 4 (Granularitaet) zeigt bei Nicht-Datumsspalten zusaetzlich
+    eine `Surrogate Date Format`-Auswahl (`yyyyMMdd`/`yyyyMM`).
+  - `sqm_PartitionRegistry`: neue Spalte `SurrogateDateFormat` (mit `ALTER TABLE ... ADD`-
+    Migrationspfad fuer bereits bestehende Installationen).
+- Auf DEV02 end-to-end verifiziert: je eine Testtabelle mit `varchar(6)`-Spalte (`BoundaryType Text`)
+  und `int`-Spalte (`BoundaryType Int`), beide im `yyyyMM`-Format - vollstaendiger Zyklus
+  Konvertierung -> `sqm_ExtendPartitionWindow` (inkl. Idempotenz-Rerun) -> Retention-Sweep
+  (`Invoke-sqmPartitionRetentionSweep.ps1`) lief in beiden Faellen fehlerfrei durch, Boundary-Werte
+  und retirierte Partitionen wurden stichprobenartig gegen `sys.partition_range_values` geprueft.
 
 ## [1.3.0.0] — 2026-07-03
 

@@ -47,9 +47,15 @@
 .PARAMETER Granularity
     Month, Quarter oder Year.
 .PARAMETER BoundaryType
-    Date (Standard bei date/datetime/datetime2/smalldatetime-Spalten), Int (int/bigint/smallint im
-    Format YYYYMMDD) oder Varchar (varchar/nvarchar mit YYYYMMDD-String-Format). Ohne Angabe wird
-    aus dem Spaltentyp automatisch abgeleitet.
+    Date (Standard bei date/datetime/datetime2/smalldatetime-Spalten), Int (numerischer
+    Surrogatschluessel, z.B. int/bigint-Spalte) oder Text (char/varchar-Surrogatschluessel mit
+    demselben Zahlenformat als String). Ohne Angabe wird aus dem Spaltentyp automatisch
+    abgeleitet: Datumstypen -> Date, int/bigint/smallint/tinyint -> Int,
+    char/varchar/nchar/nvarchar -> Text.
+.PARAMETER SurrogateDateFormat
+    Nur relevant bei BoundaryType Int oder Text: 'yyyyMMdd' (Standard, Tagesgenauigkeit) oder
+    'yyyyMM' (Monatsgenauigkeit ohne Tag, z.B. wenn die Quellspalte selbst nur auf Monatsebene
+    gefuehrt wird).
 .PARAMETER FilegroupStrategy
     Single (Standard) oder PerPeriod.
 .PARAMETER FutureBufferPeriods
@@ -131,8 +137,12 @@ function Invoke-sqmTablePartitionConversion
 		[string]$Granularity,
 
 		[Parameter(Mandatory = $false)]
-		[ValidateSet('Date', 'Int', 'Varchar')]
+		[ValidateSet('Date', 'Int', 'Text')]
 		[string]$BoundaryType,
+
+		[Parameter(Mandatory = $false)]
+		[ValidateSet('yyyyMMdd', 'yyyyMM')]
+		[string]$SurrogateDateFormat = 'yyyyMMdd',
 
 		[Parameter(Mandatory = $false)]
 		[ValidateSet('Single', 'PerPeriod')]
@@ -257,29 +267,28 @@ WHERE s.name = N'$Schema' AND t.name = N'$Table' AND c.name = N'$PartitionColumn
 			'datetime2' { "datetime2($($colType.scale))" }
 			'decimal'   { "decimal($($colType.precision),$($colType.scale))" }
 			'numeric'   { "numeric($($colType.precision),$($colType.scale))" }
+			'char'      { "char($($colType.max_length))" }
+			'varchar'   { if ([int]$colType.max_length -eq -1) { 'varchar(max)' } else { "varchar($($colType.max_length))" } }
+			'nchar'     { "nchar($([int]$colType.max_length / 2))" }
+			'nvarchar'  { if ([int]$colType.max_length -eq -1) { 'nvarchar(max)' } else { "nvarchar($([int]$colType.max_length / 2))" } }
 			default     { $typeName }
 		}
 
 		$dateTypes = @('date', 'datetime', 'datetime2', 'smalldatetime', 'datetimeoffset')
-		$intTypes = @('int', 'bigint', 'smallint')
-		$varcharTypes = @('varchar', 'nvarchar', 'char', 'nchar')
-
+		$intTypes = @('int', 'bigint', 'smallint', 'tinyint')
+		$textTypes = @('char', 'varchar', 'nchar', 'nvarchar')
 		if (-not $BoundaryType)
 		{
-			$BoundaryType = if ($typeName -in $dateTypes) { 'Date' } `
-				elseif ($typeName -in $varcharTypes) { 'Varchar' } `
-				else { 'Int' }
-			Invoke-sqmLogging -Message "BoundaryType nicht angegeben - aus Spaltentyp '$typeName' abgeleitet: $BoundaryType." -FunctionName $functionName -Level "INFO"
+			$BoundaryType = if ($typeName -in $dateTypes) { 'Date' } elseif ($typeName -in $textTypes) { 'Text' } else { 'Int' }
+			Invoke-sqmLogging -Message "BoundaryType nicht angegeben - aus Spaltentyp '$typeName' abgeleitet: $BoundaryType (SurrogateDateFormat: $SurrogateDateFormat)." -FunctionName $functionName -Level "INFO"
 		}
-
 		if ($BoundaryType -eq 'Int' -and $typeName -notin $intTypes)
 		{
-			Invoke-sqmLogging -Message "BoundaryType 'Int' bei Spaltentyp '$typeName' - es wird ein YYYYMMDD-Format als Ganzzahl erwartet. Falls die Spalte kein Datums-Surrogatschluessel ist, ist Month/Quarter/Year-Granularitaet vermutlich nicht sinnvoll." -FunctionName $functionName -Level "WARNING"
+			Invoke-sqmLogging -Message "BoundaryType 'Int' bei Spaltentyp '$typeName' - es wird ein $SurrogateDateFormat-Format erwartet. Falls die Spalte kein Datums-Surrogatschluessel ist, ist Month/Quarter/Year-Granularitaet vermutlich nicht sinnvoll." -FunctionName $functionName -Level "WARNING"
 		}
-
-		if ($BoundaryType -eq 'Varchar' -and $typeName -notin $varcharTypes)
+		if ($BoundaryType -eq 'Text' -and $typeName -notin $textTypes)
 		{
-			Invoke-sqmLogging -Message "BoundaryType 'Varchar' bei Spaltentyp '$typeName' - es wird ein YYYYMMDD-String-Format erwartet. Falls die Spalte kein Datums-Surrogatschluessel ist, ist Month/Quarter/Year-Granularitaet vermutlich nicht sinnvoll." -FunctionName $functionName -Level "WARNING"
+			Invoke-sqmLogging -Message "BoundaryType 'Text' bei Spaltentyp '$typeName' - es wird ein $SurrogateDateFormat-Format als String erwartet." -FunctionName $functionName -Level "WARNING"
 		}
 
 		# =========================================================================================
@@ -310,7 +319,7 @@ WHERE s.name = N'$Schema' AND t.name = N'$Table' AND c.name = N'$PartitionColumn
 		# =========================================================================================
 		# 4. Boundary-Liste
 		# =========================================================================================
-		$boundaries = Get-sqmPartitionBoundaryList -MinValue $minValue -MaxValue $maxValue -Granularity $Granularity -BoundaryType $BoundaryType -FutureBufferPeriods $FutureBufferPeriods
+		$boundaries = Get-sqmPartitionBoundaryList -MinValue $minValue -MaxValue $maxValue -Granularity $Granularity -BoundaryType $BoundaryType -SurrogateDateFormat $SurrogateDateFormat -FutureBufferPeriods $FutureBufferPeriods
 		Invoke-sqmLogging -Message "$($boundaries.Count) Boundary(s) berechnet -> $($boundaries.Count + 1) Partition(en)." -FunctionName $functionName -Level "INFO"
 
 		# =========================================================================================
@@ -424,7 +433,7 @@ WHERE p.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND p.index_id IN (0, 1);
 				switch ($boundaryType)
 				{
 					'Date'    { return "'$(([datetime]$value).ToString('yyyy-MM-dd'))'" }
-					'Varchar' { return "'$value'" }
+					'Text'    { return "'$value'" }
 					default   { return "$value" }
 				}
 			}
@@ -589,6 +598,7 @@ CREATE CLUSTERED INDEX [IX_${Table}_$PartitionColumn]
 				PartitionSchemeName   = $scheme.PartitionSchemeName
 				Granularity           = $Granularity
 				BoundaryType          = $BoundaryType
+				SurrogateDateFormat   = $SurrogateDateFormat
 				FilegroupStrategy     = $FilegroupStrategy
 				FutureBufferPeriods   = $FutureBufferPeriods
 			}
