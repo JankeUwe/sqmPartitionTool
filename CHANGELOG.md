@@ -2,541 +2,528 @@
 
 ## [1.7.0.0] — 2026-07-06
 
-### Zusammenfuehrung zweier parallel entwickelter Aenderungsstraenge (DEV02/DEV03)
+### Merged two changes developed in parallel (DEV02/DEV03)
 
-Waehrend an diesem Rechner (DEV03, komplett neu aufgesetzt) an `Invoke-sqmTableArchiveMigration`
-gearbeitet wurde, war auf DEV02 (mittlerweile ausgefallen) unabhaengig voneinander bereits
-`BoundaryType 'Text'` + `-SurrogateDateFormat` fuer die Partitionierungsseite entwickelt und
-gepusht worden - beide Seiten loesten dasselbe Problem (VARCHAR/CHAR-Surrogatschluessel-Spalten)
-mit unterschiedlichem Namen (`Varchar` vs. `Text`) und unterschiedlichem Funktionsumfang (DEV03:
-nur YYYYMMDD; DEV02: konfigurierbar YYYYMMDD/YYYYMM, zusaetzlich bis in `sqm_ExtendPartitionWindow`
-und den Retention-Sweep-Job durchgezogen).
+While this machine (DEV03, completely rebuilt) was working on `Invoke-sqmTableArchiveMigration`,
+DEV02 (since gone offline) had independently already developed and pushed `BoundaryType 'Text'`
++ `-SurrogateDateFormat` for the partitioning side - both sides solved the same problem
+(VARCHAR/CHAR surrogate key columns) under a different name (`Varchar` vs. `Text`) and with
+different scope (DEV03: YYYYMMDD only; DEV02: configurable YYYYMMDD/YYYYMM, also carried through
+into `sqm_ExtendPartitionWindow` and the retention sweep job).
 
-- Der DEV02-Entwurf (`Text`/`-SurrogateDateFormat`) ist der vollstaendigere und wird als kanonisch
-  uebernommen. `Invoke-sqmTableArchiveMigration` und `sqm_ArchiveMonthBatch` (bislang `Varchar`,
-  nur YYYYMMDD) sind entsprechend auf `Text` + `-SurrogateDateFormat` umgestellt worden, damit es
-  im gesamten Modul nur noch EIN Namensschema fuer Datums-Surrogatschluessel gibt.
-- Kein Funktionsverlust auf beiden Seiten: die auf DEV03 entwickelten Faehigkeiten (zusammengesetzte
-  Schluessel, Cutover-View, Write-Progress, `-Method BatchedSwap`, GUI-Ueberarbeitung) und die auf
-  DEV02 entwickelten (`Text`/`SurrogateDateFormat` durchgaengig bis Extend/Retention) sind beide
-  vollstaendig erhalten.
+- The DEV02 design (`Text`/`-SurrogateDateFormat`) is the more complete one and is adopted as
+  canonical. `Invoke-sqmTableArchiveMigration` and `sqm_ArchiveMonthBatch` (previously `Varchar`,
+  YYYYMMDD only) have been switched accordingly to `Text` + `-SurrogateDateFormat`, so there is
+  now only ONE naming scheme for date surrogate keys across the whole module.
+- No loss of capability on either side: the capabilities developed on DEV03 (composite keys,
+  cutover view, Write-Progress, `-Method BatchedSwap`, GUI rework) and the ones developed on
+  DEV02 (`Text`/`SurrogateDateFormat` carried through to Extend/Retention) are both fully
+  preserved.
 
 ## [1.6.6.0] — 2026-07-06
 
-### `Invoke-sqmTableArchiveMigration`: sichtbarer Fortschritt (Write-Progress + Konsolenausgabe)
+### `Invoke-sqmTableArchiveMigration`: visible progress (Write-Progress + console output)
 
-Nutzer-Feedback: bei einer sehr grossen Tabelle (mehrere 100GB-TB) laeuft eine Migration ueber
-Stunden bis Tage - `Invoke-sqmLogging` schreibt aber AUSSCHLIESSLICH in eine Logdatei, niemals auf
-die Konsole. Ein Admin, der den Lauf direkt per PowerShell gestartet hat (der realistische Weg fuer
-eine Migration dieser Groessenordnung - nicht durch den GUI-Assistenten, den man dafuer nicht
-stundenlang offen halten wuerde), sah bisher ueberhaupt kein Lebenszeichen, bis die Funktion ganz
-am Ende zurueckkehrt - nicht von einem haengenden Lauf unterscheidbar.
+User feedback: for a very large table (several 100GB-TB), a migration runs for hours to days -
+but `Invoke-sqmLogging` writes EXCLUSIVELY to a log file, never to the console. An admin who
+started the run directly via PowerShell (the realistic way for a migration of this scale - not
+through the GUI wizard, which nobody would want to keep open for hours) previously saw no sign
+of life at all until the function returned at the very end - indistinguishable from a hung run.
 
-- Neu: `Write-Progress` mit Prozentanzeige (Monate verarbeitet / Monate gesamt) - aktualisiert nach
-  jedem Batch, nicht nur nach jedem abgeschlossenen Monat, damit auch innerhalb eines sehr grossen
-  Monats mit vielen Batches sichtbar bleibt, dass es weitergeht.
-- Zusaetzlich je eine `Write-Host`-Zeile beim Start und beim Abschluss jedes Monats (z.B.
+- New: `Write-Progress` with a percentage display (months processed / months total) - updated
+  after every batch, not just after every completed month, so that progress remains visible even
+  within a very large month with many batches.
+- Additionally one `Write-Host` line each at the start and completion of every month (e.g.
   "Archiving period 202401 (1 of 30) ...", "Period 202401 done: 12345 row(s) archived (running
-  total: 12345)."), damit der Fortschritt auch in einem Transkript oder einer umgeleiteten Ausgabe
-  (z.B. geplanter Task, `Start-Transcript`) sichtbar bleibt, wo `Write-Progress` nicht dargestellt
-  wird.
-- Live gegen DEV01 verifiziert: Konsolenausgabe zeigt Periode-fuer-Periode den Fortschritt exakt wie
-  gewuenscht.
+  total: 12345)."), so progress remains visible in a transcript or redirected output too (e.g. a
+  scheduled task, `Start-Transcript`), where `Write-Progress` isn't rendered.
+- Verified live against DEV01: console output shows progress period-by-period exactly as
+  intended.
 
 ## [1.6.5.0] — 2026-07-05
 
-### GUI-Feedback: irrefuehrendes Key-Column-Feld + falsch anwendbare Retention-Sektion
+### GUI feedback: misleading key-column field + retention section applying where it shouldn't
 
-Nutzer-Feedback zur GUI aus [1.6.3.0]: "wenn ich diese nicht brauche dann ist es absolut
-irritierend wenn das angezeigt wird. Wenn ich sie brauche, dann ist ein Textfeld unbrauchbar" (Key
-Column) sowie "wenn einmal die Archiv-Datenbank aufgesetzt ist, wird nur noch in die
-rueckwaertsverweisende View geschrieben - 'When partitions expire later' ist dann Unsinn".
+User feedback on the GUI from [1.6.3.0]: "if I don't need this it's absolutely confusing when
+it's shown. If I need it, a text field is unusable" (key column), plus "once the archive
+database is set up, only the backward-pointing view gets written to from then on - 'When
+partitions expire later' doesn't make sense at that point".
 
-- **Key Column(s)** ist nicht mehr ein immer sichtbares Freitextfeld. Schritt 6 prueft jetzt
-  (einmalig pro Tabellenauswahl, live gegen die DB) denselben Clustered-Index/PK-Schluessel, den
-  `Invoke-sqmTableArchiveMigration` auch selbst automatisch ableiten wuerde - hat die Tabelle einen
-  brauchbaren 1-4-spaltigen Schluessel, bleibt der ganze Bereich vollstaendig ausgeblendet (nicht
-  nur deaktiviert). Nur bei einem echten Heap oder einem Schluessel mit mehr als 4 Spalten wird er
-  eingeblendet - dann als `CheckedListBox` mit den TATSAECHLICHEN Spalten der Tabelle (kein
-  Freitext, kein Tippfehlerrisiko bei Spaltennamen mehr).
-- **"Set up automatic maintenance"-Bereich** (inkl. der verschachtelten "Copy to an archive
-  database before removal"-Checkbox) wird bei aktivem "Migrate to archive database now" jetzt
-  komplett ausgeblendet statt nur ausgegraut+erklaert - der vorherige Erklaerungstext ist damit
-  hinfaellig und wurde entfernt. Berechtigter Punkt: nach einem Cutover in die Archiv-DB laeuft
-  jeder Zugriff nur noch ueber die rueckwaertsverweisende View - "wenn Partitionen spaeter ablaufen"
-  bezieht sich auf ein Konzept, das fuer die (dann gar nicht mehr als eigenstaendige Tabelle
-  existierende) Quelle keinen Sinn mehr ergibt. Das "Archive Database"-Feld bleibt (weiterhin von
-  beiden Modi gemeinsam genutzt) sichtbar und wird je nach Modus neu positioniert.
-- Live gegen DEV01 verifiziert: Heap-Tabelle (0 Schluesselspalten) und eine frische 4-spaltige
-  zusammengesetzte PK-Tabelle liefern das erwartete "gebraucht"/"nicht gebraucht"-Ergebnis ueber
-  dieselbe Abfrage, die auch tatsaechlich in der GUI verwendet wird.
+- **Key Column(s)** is no longer an always-visible free-text field. Step 6 now checks (once per
+  table selection, live against the DB) the same clustered index/PK key that
+  `Invoke-sqmTableArchiveMigration` would also derive automatically itself - if the table has a
+  usable 1-4 column key, the whole section stays completely hidden (not just disabled). Only for
+  an actual heap or a key with more than 4 columns is it shown - then as a `CheckedListBox` with
+  the table's ACTUAL columns (no free text, no more risk of a typo in a column name).
+- The **"Set up automatic maintenance" section** (including the nested "Copy to an archive
+  database before removal" checkbox) is now completely hidden when "Migrate to archive database
+  now" is active, instead of merely being grayed out with an explanation - the previous
+  explanatory text is thereby obsolete and was removed. A valid point: after a cutover to the
+  archive DB, every access goes only through the backward-pointing view - "when partitions expire
+  later" refers to a concept that no longer makes sense for the source (which by then doesn't
+  even exist anymore as a standalone table). The "Archive Database" field remains visible
+  (still shared by both modes) and is repositioned depending on the mode.
+- Verified live against DEV01: a heap table (0 key columns) and a fresh 4-column composite PK
+  table produce the expected "needed"/"not needed" result via the same query that's actually used
+  in the GUI.
 
 ## [1.6.4.0] — 2026-07-05
 
-### `Invoke-sqmTableArchiveMigration`: YYYYMMDD-Ganzzahl-/String-Datumsspalten (BoundaryType)
+### `Invoke-sqmTableArchiveMigration`: YYYYMMDD integer/string date columns (BoundaryType)
 
-Beim Live-Test von [1.6.3.0] gegen die reale `CORO_DB.dbo.CARCHIVE`-Tabelle (der urspruengliche
-Anlass fuer den zusammengesetzten Schluessel) schlug die Migration selbst danach noch fehl: `VTDAT`
-ist als `INT` im YYYYMMDD-Format gespeichert (z.B. `20240115`), nicht als echtes DATE/DATETIME - die
-Funktion castete den Quellwertebereich aber blind per `[datetime]`, und die SQL-Prozedur verglich
-fest DATE-typisierte Periodengrenzen direkt gegen die Spalte ("date ist inkompatibel mit int"). Eine
-separate, vorbestehende Luecke - unabhaengig vom zusammengesetzten Schluessel, aber notwendig, um
-den urspruenglichen Bug-Report ueberhaupt einmal komplett end-to-end durchspielen zu koennen.
+During the live test of [1.6.3.0] against the real `CORO_DB.dbo.CARCHIVE` table (the original
+trigger for the composite key), the migration still failed afterwards: `VTDAT` is stored as
+`INT` in YYYYMMDD format (e.g. `20240115`), not as a real DATE/DATETIME - but the function blindly
+cast the source value range via `[datetime]`, and the SQL procedure directly compared
+DATE-typed period boundaries against the column ("date is incompatible with int"). A separate,
+pre-existing gap - independent of the composite key, but necessary to be able to play through the
+original bug report end-to-end at all.
 
-Die Partitionierungsseite des Moduls (`Invoke-sqmTablePartitionConversion`/
-`Get-sqmPartitionBoundaryList`) kennt diese Konvention bereits (`-BoundaryType Int`/`Varchar` fuer
-ein YYYYMMDD-Surrogat) - `Invoke-sqmTableArchiveMigration` uebernimmt jetzt dieselbe Konvention statt
-sie neu zu erfinden.
+The partitioning side of the module (`Invoke-sqmTablePartitionConversion`/
+`Get-sqmPartitionBoundaryList`) already knows this convention (`-BoundaryType Int`/`Varchar` for
+a YYYYMMDD surrogate) - `Invoke-sqmTableArchiveMigration` now adopts the same convention instead
+of reinventing it.
 
-- **`Invoke-sqmTableArchiveMigration`**: `-BoundaryType` (bereits vorhandener, bisher nur an
-  `Invoke-sqmTablePartitionConversion` durchgereichter Parameter) wird jetzt zusaetzlich lokal
-  ausgewertet - ohne Angabe automatische Ableitung aus dem SQL-Spaltentyp von `-DateColumn`
-  (Date/Datetime-Typen -> `Date`, Varchar/Nvarchar/Char/Nchar -> `Varchar`, sonst -> `Int`, gleiche
-  Herleitung wie in `Invoke-sqmTablePartitionConversion`). Start/EndPeriod-Ableitung aus dem
-  Quellwertebereich parst `MinValue` bei `Int`/`Varchar` jetzt als YYYYMMDD-String statt per
-  direktem `[datetime]`-Cast. Die Periodengrenzen fuer `-PurgeSourceAfterArchive`s
-  Row-Count-Gegenpruefung/Loeschung werden je nach `BoundaryType` passend formatiert (Int: rohe
-  Ganzzahl, Varchar: quotierter String, Date: quotiertes ISO-Datum) statt immer als Datums-Literal.
-- **`sqm_ArchiveMonthBatch`**: neuer Parameter `@BoundaryType` (Date/Int/Varchar, Standard `Date`
-  fuer Abwaertskompatibilitaet bei direkten Prozeduraufrufen ohne diesen Parameter). Die
-  Periodengrenzen (`@PeriodStart`/`@PeriodEnd`) dienen weiterhin nur der Kalenderarithmetik aus
-  `@YYYYMM` - fuer den eigentlichen Vergleich mit `@DateColumn` werden sie zusaetzlich in
-  `SQL_VARIANT`-Parameter mit dem zu `@BoundaryType` passenden Ganzzahl-/String-/Datumswert
-  konvertiert (gleiches, bereits bewaehrtes Prinzip wie die `@pLastKeyN`-Schluesselparameter aus
-  [1.6.3.0]).
-- Live gegen die ECHTE `CORO_DB.dbo.CARCHIVE`-Tabelle verifiziert (30 Monate verarbeitet, davon 12
-  mit tatsaechlichen Daten - Jan-Dez 2024, 60000/60000 Zeilen, Quelle danach unveraendert): Checksumme
-  ueber alle 34 nicht-`text`-Spalten sowie Gesamtlaenge der `text`-Spalte (`VDATA`) stimmen zwischen
-  Quelle und Archiv-Kopie exakt ueberein. Damit ist der urspruengliche Bug-Report (zusammengesetzter
-  Schluessel + YYYYMMDD-Ganzzahlspalte gemeinsam) jetzt vollstaendig end-to-end verifiziert, nicht
-  nur mit synthetischen Testtabellen.
+- **`Invoke-sqmTableArchiveMigration`**: `-BoundaryType` (an already-existing parameter, so far
+  only passed through to `Invoke-sqmTablePartitionConversion`) is now additionally evaluated
+  locally - without it being specified, it's automatically derived from the SQL column type of
+  `-DateColumn` (Date/Datetime types -> `Date`, Varchar/Nvarchar/Char/Nchar -> `Varchar`,
+  otherwise -> `Int`, same derivation as in `Invoke-sqmTablePartitionConversion`). The
+  Start/EndPeriod derivation from the source value range now parses `MinValue` for `Int`/`Varchar`
+  as a YYYYMMDD string instead of via a direct `[datetime]` cast. The period boundaries for
+  `-PurgeSourceAfterArchive`'s row-count cross-check/deletion are now formatted appropriately per
+  `BoundaryType` (Int: raw integer, Varchar: quoted string, Date: quoted ISO date) instead of
+  always as a date literal.
+- **`sqm_ArchiveMonthBatch`**: new parameter `@BoundaryType` (Date/Int/Varchar, default `Date`
+  for backward compatibility with direct procedure calls that don't pass this parameter). The
+  period boundaries (`@PeriodStart`/`@PeriodEnd`) still only serve calendar arithmetic from
+  `@YYYYMM` - for the actual comparison with `@DateColumn` they are additionally converted into
+  `SQL_VARIANT` parameters with the integer/string/date value matching `@BoundaryType` (the same,
+  already-proven principle as the `@pLastKeyN` key parameters from [1.6.3.0]).
+- Verified live against the REAL `CORO_DB.dbo.CARCHIVE` table (30 months processed, 12 of them
+  with actual data - Jan-Dec 2024, 60000/60000 rows, source unchanged afterwards): the checksum
+  over all 34 non-`text` columns as well as the total length of the `text` column (`VDATA`) match
+  exactly between source and archive copy. This fully verifies the original bug report (composite
+  key + YYYYMMDD integer column together) end-to-end, not just with synthetic test tables.
 
 ## [1.6.3.0] — 2026-07-05
 
-### Zusammengesetzte Schluessel fuer `Invoke-sqmTableArchiveMigration` + GUI-Klarstellungen
+### Composite keys for `Invoke-sqmTableArchiveMigration` + GUI clarifications
 
-Show Stopper aus Live-Test gegen die reale Tabelle `CORO_DB.dbo.CARCHIVE` (7 TB in Produktion):
-`-KeyColumn` unterstuetzte bisher nur EINE Spalte, verwendet sowohl als MERGE-Abgleichsbedingung
-als auch fuer die Keyset-Pagination innerhalb eines Monats - `CARCHIVE` hat aber einen
-zusammengesetzten 4-spaltigen Clustered-PK (`VMTG, VID1, VID2, VSEQ`), keine Spalte davon ist
-allein eindeutig. Da alles VOR der eigentlichen Archivierung abbricht (die KeyColumn-Ermittlung ist
-der allererste Schritt), wurde bislang auch in `CORO_DB` nichts angelegt (weder Archiv-Tabelle noch
-`sqm_ArchiveMonthLog`/`sqm_ArchiveMonthBatch`) - das erklaerte gleich drei gemeldete Symptome
-("KeyColumn Pflicht", "keine neue Tabelle in der Archiv-DB", "wo ist die Merge-Prozedur/Hilfstabelle,
-die wir schon besprochen hatten") als EINE gemeinsame Ursache.
+A show-stopper from a live test against the real table `CORO_DB.dbo.CARCHIVE` (7 TB in
+production): `-KeyColumn` so far only supported ONE column, used both as the MERGE match
+condition and for keyset pagination within a month - but `CARCHIVE` has a composite 4-column
+clustered PK (`VMTG, VID1, VID2, VSEQ`), none of these columns is unique on its own. Since
+everything aborted BEFORE the actual archiving (key-column determination is the very first step),
+nothing had been created in `CORO_DB` either (neither the archive table nor
+`sqm_ArchiveMonthLog`/`sqm_ArchiveMonthBatch`) - which explained three reported symptoms at once
+("KeyColumn required", "no new table in the archive DB", "where is the merge procedure/helper
+table we already discussed") as ONE shared root cause.
 
-- **`Invoke-sqmTableArchiveMigration`**: `-KeyColumn` akzeptiert jetzt 1-4 Spalten
-  (`[string[]]`, `ValidateCount(1,4)`) statt nur einer. Automatische Ableitung (ohne `-KeyColumn`)
-  nimmt jetzt ALLE Spalten eines zusammengesetzten Clustered Index/PK in `key_ordinal`-Reihenfolge,
-  statt bei mehr als einer Spalte abzubrechen - nur ein echter Heap oder ein Schluessel mit mehr als
-  4 Spalten verlangt weiterhin die explizite Angabe. Neuer, nicht blockierender Warnhinweis vor dem
-  Migrationslauf, falls kein Index `$DateColumn` als fuehrende Spalte hat (bei sehr grossen Tabellen
-  sonst potenziell ein Full Scan pro Batch) - empfiehlt einen Index auf `($DateColumn, <Schluessel>)`,
-  legt ihn aber nicht automatisch an (Admin-Entscheidung).
-- **`sqm_ArchiveMonthBatch`**: `@KeyColumn SYSNAME` ersetzt durch `@KeyColumns NVARCHAR(400)`
-  (komma-getrennt, `key_ordinal`-Reihenfolge). MERGE-ON, UPDATE-SET-Ausschluss, ORDER BY und die
-  Keyset-Pagination-Bedingung werden jetzt dynamisch fuer 1-4 Spalten aufgebaut. Zwei
-  Korrektheitspunkte, die bei einem zusammengesetzten Schluessel NICHT trivial sind (ausfuehrlich im
-  Datei-Header dokumentiert): (1) die Pagination-Bedingung ist die echte lexikografische
-  Tupel-">"-Auswertung als verschachtelter OR/AND-Ausdruck, NICHT einzeln UND-verknuepfte
-  Spalten-">"-Vergleiche (das wuerde Zeilen faelschlich auslassen); (2) der neue Fortsetzpunkt nach
-  einem Batch wird ueber eine `ROW_NUMBER() OVER (ORDER BY <Schluessel>)`-Sequenznummer je
-  Batch-Zeile ermittelt (die Zeile mit der hoechsten Sequenznummer), NICHT ueber das spaltenweise
-  Maximum (das bei zusammengesetzten Schluesseln eine nie existierende Tupel-Kombination erzeugen
-  und dadurch spaeter echte Zeilen dauerhaft und stillschweigend ueberspringen kann - Datenverlust
-  auf einer 7-TB-Tabelle waere die Folge gewesen).
-- **`sqm_ArchiveMonthLog`**: neue Spalten `LastKeyProcessed1`..`LastKeyProcessed4` (Fortsetzpunkt als
-  Tupel), additiv per idempotentem `ALTER TABLE ... ADD` nachgezogen (alte Einzelspalte
-  `LastKeyProcessed` bleibt unbenutzt erhalten). Der Upgrade-Pfad war fuer diese Session nicht
-  optional - DEV01s Testdatenbank hatte das alte Schema bereits aus frueheren Tests deployed.
-- **`Show-sqmPartitionToolGui`**: neues optionales "Key Column(s)"-Feld in Schritt 6 (nur bei
-  "Migrate to archive database now" aktiv, leer = automatische Ableitung). Zusaetzlich zwei
-  Klarstellungen aus demselben Bug-Report: ein erklaerender Hinweistext erscheint, wenn "Migrate
-  now" aktiv ist ("Automated maintenance for the archive copy is registered automatically...") -
-  vorher wurde der Wartungsbereich kommentarlos ausgegraut; und die verschachtelte "Copy to an
-  archive database before removal"-Checkbox wurde umformuliert ("When partitions expire later, move
-  their data to an archive database first...") plus Tooltip, um klarzustellen, dass sie sich auf die
-  ANDERE, laufende automatisierte Retention bezieht - nicht auf die sofortige Migration oben.
-- Live gegen DEV01 verifiziert: eigens gebaute Testtabelle mit echtem 4-spaltigem zusammengesetzten
-  Schluessel (keine Teilmenge der 4 Spalten fuer sich allein eindeutig, um das
-  Maximum-pro-Spalte-Risiko gezielt zu pruefen), `-BatchSize 137` erzwingt ~4-6 Batches pro Monat -
-  2000/2000 Zeilen archiviert, Quelle/Archiv-Checksummen identisch, keine doppelten/ausgelassenen
-  Zeilen, Fortsetzpunkt-Tupel im Log plausibel je Monat fortgeschrieben. Sowohl mit explizitem
-  `-KeyColumn` als auch mit automatischer Ableitung getestet. Regressionstest mit einer
-  Einzelspalten-IDENTITY-Tabelle (unveraendertes Verhalten) bestanden.
-  **Bekannte, separate Einschraenkung** (nicht Teil dieser Aenderung, live gegen die echte
-  `CORO_DB.dbo.CARCHIVE`-Tabelle entdeckt): `-DateColumn` wird intern als echter DATE/DATETIME-Typ
-  behandelt (Cast + DATE-typisierte Batch-Parameter) - eine als `INT` im Format YYYYMMDD
-  gespeicherte Datumsspalte (wie `CARCHIVE.VTDAT`) wird dadurch NICHT unterstuetzt
-  ("date ist inkompatibel mit int"). Diese Einschraenkung bestand bereits vor dieser Aenderung und
-  ist kein Teil des Zusammengesetzte-Schluessel-Fixes - separat zu adressieren, falls benoetigt.
+- **`Invoke-sqmTableArchiveMigration`**: `-KeyColumn` now accepts 1-4 columns (`[string[]]`,
+  `ValidateCount(1,4)`) instead of only one. Automatic derivation (without `-KeyColumn`) now
+  takes ALL columns of a composite clustered index/PK in `key_ordinal` order, instead of aborting
+  for more than one column - only an actual heap or a key with more than 4 columns still requires
+  explicit specification. New, non-blocking warning before the migration run if no index has
+  `$DateColumn` as its leading column (otherwise potentially a full scan per batch on very large
+  tables) - recommends an index on `($DateColumn, <key>)`, but doesn't create it automatically
+  (admin's decision).
+- **`sqm_ArchiveMonthBatch`**: `@KeyColumn SYSNAME` replaced with `@KeyColumns NVARCHAR(400)`
+  (comma-separated, `key_ordinal` order). The MERGE ON clause, UPDATE SET exclusion, ORDER BY and
+  the keyset pagination condition are now built dynamically for 1-4 columns. Two correctness
+  points that are NOT trivial with a composite key (documented in detail in the file header):
+  (1) the pagination condition is the true lexicographic tuple ">" evaluation as a nested
+  OR/AND expression, NOT individually AND-combined column ">" comparisons (that would incorrectly
+  skip rows); (2) the new resume point after a batch is determined via a
+  `ROW_NUMBER() OVER (ORDER BY <key>)` sequence number per batch row (the row with the highest
+  sequence number), NOT via the column-wise maximum (which for composite keys can produce a tuple
+  combination that never exists and thereby silently and permanently skip real rows later - data
+  loss on a 7 TB table would have been the consequence).
+- **`sqm_ArchiveMonthLog`**: new columns `LastKeyProcessed1`..`LastKeyProcessed4` (resume point as
+  a tuple), added additively via an idempotent `ALTER TABLE ... ADD` (the old single column
+  `LastKeyProcessed` remains, unused). The upgrade path wasn't optional for this session - DEV01's
+  test database already had the old schema deployed from earlier tests.
+- **`Show-sqmPartitionToolGui`**: new optional "Key Column(s)" field in step 6 (only active with
+  "Migrate to archive database now", empty = automatic derivation). Also two clarifications from
+  the same bug report: an explanatory hint appears when "Migrate now" is active ("Automated
+  maintenance for the archive copy is registered automatically...") - previously the maintenance
+  section was simply grayed out without comment; and the nested "Copy to an archive database
+  before removal" checkbox was reworded ("When partitions expire later, move their data to an
+  archive database first...") plus a tooltip, to clarify that it refers to the OTHER, ongoing
+  automated retention - not the immediate migration above.
+- Verified live against DEV01: a purpose-built test table with a real 4-column composite key (no
+  subset of the 4 columns unique on its own, to specifically test the maximum-per-column risk),
+  `-BatchSize 137` forces ~4-6 batches per month - 2000/2000 rows archived, source/archive
+  checksums identical, no duplicate/skipped rows, resume-point tuple advanced plausibly per month
+  in the log. Tested both with an explicit `-KeyColumn` and with automatic derivation. Regression
+  test with a single-column IDENTITY table (unchanged behavior) passed.
+  **A known, separate limitation** (not part of this change, discovered live against the real
+  `CORO_DB.dbo.CARCHIVE` table): `-DateColumn` is internally treated as a real DATE/DATETIME type
+  (cast + DATE-typed batch parameters) - a date column stored as `INT` in YYYYMMDD format (like
+  `CARCHIVE.VTDAT`) is therefore NOT supported ("date is incompatible with int"). This limitation
+  already existed before this change and is not part of the composite-key fix - to be addressed
+  separately if needed.
 
 ## [1.6.2.0] — 2026-07-05
 
-### `Invoke-sqmTableArchiveMigration`: Cutover zur Archiv-View + GUI "Migrate now"
+### `Invoke-sqmTableArchiveMigration`: cutover to the archive view + GUI "Migrate now"
 
-Show Stopper aus Live-Test: die GUI konfigurierte mit gesetzter "Archive Database" bisher nur eine
-SPAETERE, automatisierte Retention (einzelne, abgelaufene Partitionen wandern erst nach Ablauf ihrer
-Retention-Frist ins Archiv) - die Quelltabelle wurde dabei sofort in-place partitioniert und blieb
-dort. Kundenanforderung war stattdessen ein sofortiger, vollstaendiger Umzug: Kopie + Partitionierung
-in der Archiv-DB, Datenuebertragung per bestehender MERGE-Prozedur, Fortsetzpunkt-Tracking in der
-Quelldatenbank, abschliessend Umbenennen der Quelltabelle + Kompatibilitaets-View unter dem alten
-Namen auf die Archiv-Kopie - genau das bereits bei `Invoke-sqmTableRelocation` etablierte Cutover-
-Muster, jetzt auch fuer den monatsweisen, partitionierten Archiv-Pfad.
+A show-stopper from a live test: with "Archive Database" set, the GUI so far only configured a
+LATER, automated retention (individual, expired partitions only move to the archive after their
+retention period expires) - the source table itself was partitioned in-place immediately and
+stayed there. The customer requirement instead was an immediate, complete move: copy +
+partitioning in the archive DB, data transfer via the existing MERGE procedure, resume-point
+tracking in the source database, and finally renaming the source table + a compatibility view
+under the old name pointing to the archive copy - exactly the cutover pattern already established
+for `Invoke-sqmTableRelocation`, now also for the monthly, partitioned archive path.
 
-- **`Invoke-sqmTableArchiveMigration`**: neue Schalter `-CutoverToArchiveView` und
-  `-RenamedTableSuffix` (Standard `_Original`, gleiche Konvention wie `Invoke-sqmTableRelocation`).
-  Sobald alle angeforderten Monate (`-StartPeriod`..`-EndPeriod`) archiviert sind (egal ob in
-  diesem oder einem frueheren Aufruf), wird die Quelltabelle umbenannt (bleibt vollstaendig
-  erhalten, kein automatisches Drop) und unter ihrem alten Namen durch eine View auf die
-  partitionierte Archiv-Kopie ersetzt - bestehender Anwendungscode laeuft unveraendert weiter.
-  Idempotent (Cutover wird uebersprungen, wenn die umbenannte Tabelle schon existiert) und ueber
-  `-WhatIf`/`-Confirm` absicherbar. Der laufende, noch offene Monat wird nie automatisch migriert
-  und bleibt daher als Restbestand in der umbenannten Tabelle zurueck - wird explizit im Log
-  ausgewiesen, damit der Admin ihn vor dem Loeschen pruefen/nachziehen kann. Rueckgabeobjekt um
-  `CutoverPerformed` erweitert.
-- **`Show-sqmPartitionToolGui`**: neue Checkbox "Migrate to archive database now" in Schritt 6 -
-  exklusiv zur bestehenden "spaetere automatisierte Retention"-Option (beide schliessen sich fuer
-  einen Wizard-Durchlauf gegenseitig aus). Ruft in Schritt 7 `Invoke-sqmTableArchiveMigration` mit
-  `-PurgeSourceAfterArchive -CutoverToArchiveView` auf statt `Invoke-sqmTablePartitionConversion` +
-  `Register-sqmPartitionTable`. `-KeyColumn` wird nicht separat abgefragt - automatische Ableitung
-  aus einem einspaltigen Clustered Index/PK wie bisher; bei zusammengesetztem Schluessel/Heap
-  bricht die Funktion mit einer klaren Fehlermeldung ab.
-- Live gegen echten SQL Server getestet (DEV01) - dabei zwei Faelle gefunden und behoben, die beim
-  reinen Code-Review nicht aufgefallen waeren: (1) ein bereits (per `-PurgeSourceAfterArchive`)
-  vollstaendig geleerter Quelltabellen-Folgeaufruf schlug bisher schon beim Lesen des
-  Quellwertebereichs fehl ("Tabelle ist leer"), obwohl genau das der Fall ist, in dem
-  `-CutoverToArchiveView` sinnvoll nachgeholt werden soll - Start/EndPeriod werden jetzt aus
-  `dbo.sqm_ArchiveMonthLog` abgeleitet, wenn die Quelle leer, aber bereits Historie vorhanden ist.
-  (2) ein erneuter Aufruf NACH bereits erfolgtem Cutover scheiterte mit einer irrefuehrenden
-  "-KeyColumn ist Pflicht"-Meldung (die Quelltabelle ist jetzt ja eine View ohne Clustered Index) -
-  wird jetzt ganz am Anfang erkannt und als sauberes No-Op ("bereits abgeschlossen") behandelt.
+- **`Invoke-sqmTableArchiveMigration`**: new switches `-CutoverToArchiveView` and
+  `-RenamedTableSuffix` (default `_Original`, same convention as `Invoke-sqmTableRelocation`).
+  Once all requested months (`-StartPeriod`..`-EndPeriod`) have been archived (whether in this
+  call or an earlier one), the source table is renamed (fully preserved, no automatic drop) and
+  replaced under its old name by a view onto the partitioned archive copy - existing application
+  code keeps running unchanged. Idempotent (cutover is skipped if the renamed table already
+  exists) and can be guarded via `-WhatIf`/`-Confirm`. The current, still-open month is never
+  migrated automatically and therefore remains as a residual in the renamed table - explicitly
+  reported in the log so the admin can review/follow up before deleting it. The return object was
+  extended with `CutoverPerformed`.
+- **`Show-sqmPartitionToolGui`**: new checkbox "Migrate to archive database now" in step 6 -
+  mutually exclusive with the existing "later automated retention" option (both are exclusive for
+  a single wizard run). In step 7 calls `Invoke-sqmTableArchiveMigration` with
+  `-PurgeSourceAfterArchive -CutoverToArchiveView` instead of `Invoke-sqmTablePartitionConversion`
+  + `Register-sqmPartitionTable`. `-KeyColumn` is not asked separately - automatic derivation from
+  a single-column clustered index/PK as before; for a composite key/heap the function aborts with
+  a clear error message.
+- Tested live against a real SQL Server (DEV01) - two cases found and fixed there that wouldn't
+  have surfaced from a pure code review: (1) a follow-up call on a source table already fully
+  emptied (via `-PurgeSourceAfterArchive`) previously already failed when reading the source value
+  range ("table is empty"), even though this is exactly the case where `-CutoverToArchiveView`
+  should sensibly be applied retroactively - Start/EndPeriod are now derived from
+  `dbo.sqm_ArchiveMonthLog` when the source is empty but history already exists. (2) a repeat call
+  AFTER a cutover had already happened failed with a misleading "-KeyColumn is required" message
+  (the source table is now a view without a clustered index) - this is now detected right at the
+  start and treated as a clean no-op ("already completed").
 
 ## [1.6.1.0] — 2026-07-05
 
-### `Show-sqmPartitionToolGui`: SQL Server Authentication + Zertifikatsvertrauen
+### `Show-sqmPartitionToolGui`: SQL Server authentication + certificate trust
 
-Show Stopper aus Live-Test gegen einen Workgroup-Rechner (kein Domaenen-Trust, nur SQL-Logins
-konfiguriert): die GUI unterstuetzte in Schritt 0 ("Verbindung") ausschliesslich Windows-
-Authentifizierung - kein Login/Passwort-Feld, kein Weg, sich per SQL-Auth zu verbinden.
+A show-stopper from a live test against a workgroup machine (no domain trust, only SQL logins
+configured): in step 0 ("Connection") the GUI only supported Windows authentication - no
+login/password field, no way to connect via SQL auth.
 
-- Neue Felder in Schritt 0: Windows/SQL Server Authentication (Radiobuttons) + Login/Passwort
-  (nur bei SQL-Auth aktiv). `$script:connParams['SqlCredential']` wird daraus gebaut und von
-  ALLEN folgenden Schritten wiederverwendet (Tabellen-/Spaltenauswahl, Boundary-Vorschau,
-  Ausfuehrung) - unveraendertes, bereits bewaehrtes Splat-Muster.
-- **Zusaetzlicher, beim Testen gefundener Bug**: der `Get-DbaDatabase`-Aufruf in Schritt 0 (rohe
-  Instanz als String) schlaegt bei einem selbst signierten Zertifikat (Normalfall bei einer
-  frischen SQL-Server-Installation) NICHT mit einer Exception fehl, sondern loggt nur eine
-  Warnung und liefert STILLSCHWEIGEND 0 Datenbanken zurueck - in der GUI waere das faelschlich als
-  "0 database(s) found (OK)" erschienen, ohne dass der eigentliche Fehler sichtbar wird. Fix: nur
-  fuer diesen einen Aufruf explizit ueber `Connect-DbaInstance -TrustServerCertificate` verbinden
-  und das Ergebnisobjekt fuer `Get-DbaDatabase` verwenden (NICHT an spaetere Schritte
-  weitergereicht - ein verbundenes Objekt mit abweichender `-Database` an eine andere Funktion
-  weiterzugeben fiel bei Tests unerwartet auf Windows-Auth zurueck; der rohe Instanzname +
-  `-SqlCredential`, den alle sqmPartitionTool-Funktionen selbst nutzen, braucht das nicht und
-  funktioniert bereits klaglos mit einem selbst signierten Zertifikat).
+- New fields in step 0: Windows/SQL Server Authentication (radio buttons) + login/password
+  (only active with SQL auth). `$script:connParams['SqlCredential']` is built from this and
+  reused by ALL following steps (table/column selection, boundary preview, execution) -
+  unchanged, already-proven splat pattern.
+- **An additional bug found while testing**: the `Get-DbaDatabase` call in step 0 (raw instance
+  as a string) does NOT fail with an exception on a self-signed certificate (the normal case for a
+  fresh SQL Server install), but only logs a warning and SILENTLY returns 0 databases - in the GUI
+  this would have incorrectly shown as "0 database(s) found (OK)", without the actual error
+  becoming visible. Fix: connect explicitly for this one call via
+  `Connect-DbaInstance -TrustServerCertificate` and use the resulting object for
+  `Get-DbaDatabase` (NOT passed on to later steps - passing a connected object with a differing
+  `-Database` to another function unexpectedly fell back to Windows auth during testing; the raw
+  instance name + `-SqlCredential`, which all sqmPartitionTool functions use themselves, doesn't
+  need this and already works fine with a self-signed certificate).
 
 ## [1.6.0.0] — 2026-07-05
 
-### Speicherplatz-schonende, segmentweise Migration (Quellenbereinigung + Shrink)
+### Space-friendly, segment-wise migration (source cleanup + shrink)
 
-Kundenanfrage: auf SAN/Datentraegern mit wenig freiem Platz wird der Platz waehrend einer
-Migration immer knapper, weil Quelle und Kopie gleichzeitig Platz brauchen und bisher erst nach
-vollstaendigem Abschluss irgendetwas freigegeben werden konnte. Zwei unabhaengige, rein additive
-Erweiterungen (Standardverhalten unveraendert):
+Customer request: on SAN/storage with little free space, space during a migration keeps getting
+tighter, because source and copy both need space at the same time, and previously nothing could
+be freed until the migration was fully complete. Two independent, purely additive extensions
+(default behavior unchanged):
 
-- **`Invoke-sqmTableArchiveMigration`**: neue Schalter `-PurgeSourceAfterArchive` (loescht nach
-  jedem als abgeschlossen bestaetigten Monat dessen Zeilen aus der Quelltabelle - erst nach einer
-  Row-Count-Gegenpruefung gegen `dbo.sqm_ArchiveMonthLog`, in Batches wie der bestehende
-  MERGE-Batch-Mechanismus), `-ShrinkAfterEveryNPeriods` und `-AggressiveShrink`. Keine Aenderung
-  an `sqm_ArchiveMonthBatch.proc.sql` noetig - der Purge laeuft komplett in PowerShell nach dem
-  Prozeduraufruf, mit derselben Monatsgrenze wie die MERGE.
-- **`Invoke-sqmTablePartitionConversion`**: neues `-Method BatchedSwap` (zusaetzlich zu
-  `Default`/`NewTableSwap`) fuer sehr grosse Tabellen ohne separate Archiv-Datenbank - baut eine
-  neue, leere partitionierte Kopie und verschiebt die Daten segmentweise (je Boundary-Periode,
-  weiter unterteilt in `-BatchSize`) per atomarem `DELETE ... OUTPUT ... INTO` (Quelle und Ziel in
-  derselben Datenbank - kein separater Verify-Schritt noetig, im Unterschied zur
-  archiv-datenbank-uebergreifenden Variante oben). Gilt fuer Heap UND indizierte/PK-Tabellen
-  (bisheriges `NewTableSwap` nur fuer Heaps). Optional `-DataCompression` und periodisches
-  Shrinken (`-ShrinkAfterEveryNSegments`/`-AggressiveShrink`) der Quelltabelle, waehrend sie sich
-  leert. Abschliessend `sp_rename`-Swap (alte, jetzt leere Tabelle -> `..._sqmPartOld`, neue
-  Tabelle -> Originalname) - Quelle wird wie bei `NewTableSwap` nie automatisch geloescht.
-  **V1-Einschraenkung**: bricht mit Fehler ab, wenn die Tabelle eingehende Fremdschluessel oder
-  Trigger hat (fuer diese Faelle weiterhin `-Method Default`/`NewTableSwap` verwenden) -
-  automatische FK-/Trigger-/Berechtigungs-Uebernahme ist bewusst nicht Teil dieser Version.
-- Neue private Hilfsfunktion `Get-sqmTableDefinitionSql` (Spalten-/Index-/PK-DDL-Rekonstruktion),
-  extrahiert aus der bisher inline duplizierten Logik in `Invoke-sqmPartitionArchive.ps1`
-  (Verhalten dort unveraendert, jetzt nur wiederverwendet statt dupliziert).
-- Neue private Hilfsfunktion `Invoke-sqmFileSpaceShrink` (gemeinsam von beiden Features
-  verwendet): standardmaessig `DBCC SHRINKFILE(..., TRUNCATEONLY)` (schnell, keine
-  Seitenverschiebung/Fragmentierung, gibt nur am Dateiende freien Platz zurueck), mit
-  `-Aggressive` (`-AggressiveShrink` auf den aufrufenden Funktionen) stattdessen ein voller Shrink
-  (mehr Platzgewinn, fragmentiert die verbleibenden Indizes - Rebuild danach empfohlen).
+- **`Invoke-sqmTableArchiveMigration`**: new switches `-PurgeSourceAfterArchive` (deletes, after
+  every month confirmed complete, its rows from the source table - only after a row-count
+  cross-check against `dbo.sqm_ArchiveMonthLog`, in batches like the existing MERGE-batch
+  mechanism), `-ShrinkAfterEveryNPeriods` and `-AggressiveShrink`. No change to
+  `sqm_ArchiveMonthBatch.proc.sql` needed - the purge runs entirely in PowerShell after the
+  procedure call, using the same month boundary as the MERGE.
+- **`Invoke-sqmTablePartitionConversion`**: new `-Method BatchedSwap` (in addition to
+  `Default`/`NewTableSwap`) for very large tables without a separate archive database - builds a
+  new, empty partitioned copy and moves the data segment by segment (per boundary period, further
+  subdivided by `-BatchSize`) via an atomic `DELETE ... OUTPUT ... INTO` (source and target in the
+  same database - no separate verify step needed, unlike the cross-archive-database variant
+  above). Applies to both heap AND indexed/PK tables (the previous `NewTableSwap` only for
+  heaps). Optional `-DataCompression` and periodic shrinking
+  (`-ShrinkAfterEveryNSegments`/`-AggressiveShrink`) of the source table while it empties out.
+  Finally an `sp_rename` swap (old, now-empty table -> `..._sqmPartOld`, new table -> original
+  name) - the source is never automatically dropped, same as with `NewTableSwap`.
+  **V1 limitation**: aborts with an error if the table has incoming foreign keys or triggers (for
+  these cases keep using `-Method Default`/`NewTableSwap`) - automatic FK/trigger/permission
+  carry-over is deliberately not part of this version.
+- New private helper function `Get-sqmTableDefinitionSql` (column/index/PK DDL reconstruction),
+  extracted from the logic previously duplicated inline in `Invoke-sqmPartitionArchive.ps1`
+  (behavior there unchanged, now just reused instead of duplicated).
+- New private helper function `Invoke-sqmFileSpaceShrink` (used by both features): by default
+  `DBCC SHRINKFILE(..., TRUNCATEONLY)` (fast, no page movement/fragmentation, only returns free
+  space at the end of the file), with `-Aggressive` (`-AggressiveShrink` on the calling functions)
+  a full shrink instead (more space reclaimed, fragments the remaining indexes - a rebuild is
+  recommended afterwards).
 
 ## [1.5.1.0] — 2026-07-05
 
-### `-DataCompression` und `-ConfirmArchiveTable` fuer `Invoke-sqmTableArchiveMigration` / `Invoke-sqmPartitionArchive`
+### `-DataCompression` and `-ConfirmArchiveTable` for `Invoke-sqmTableArchiveMigration` / `Invoke-sqmPartitionArchive`
 
-Kundenanfrage: manche Kunden bestehen auf eine bestimmte Kompressionseinstellung fuer
-Archiv-Tabellen, und ein Admin soll die leere Archiv-Tabelle vor dem eigentlichen
-Partitionieren/Daten-Kopieren pruefen koennen, statt dass der Ablauf ohne Zwischenstopp
-durchlaeuft.
+Customer request: some customers insist on a specific compression setting for archive tables,
+and an admin should be able to check the empty archive table before the actual
+partitioning/data-copy step, instead of the process running through without a pause.
 
-- **`-DataCompression`** (`None`/`Row`/`Page`, Standard `None`) auf beiden Funktionen. Wird nur
-  angewendet, wenn die Archiv-Tabelle in diesem Aufruf NEU angelegt wird - `SELECT INTO` kennt
-  keine Kompressions-Klausel, daher als separates `ALTER TABLE ... REBUILD` danach:
+- **`-DataCompression`** (`None`/`Row`/`Page`, default `None`) on both functions. Only applied
+  when the archive table is NEWLY created in this call - `SELECT INTO` has no compression clause,
+  so it's applied as a separate `ALTER TABLE ... REBUILD` afterwards:
   - `Invoke-sqmTableArchiveMigration`: `REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = ...)`
-    NACH der Partitionierung (gilt fuer alle Partitionen).
-  - `Invoke-sqmPartitionArchive`: `REBUILD WITH (DATA_COMPRESSION = ...)` direkt nach dem
-    `SELECT INTO` (die Archiv-Tabelle hier ist nicht partitioniert).
-- **`-ConfirmArchiveTable`** (Switch, Standard aus) auf beiden Funktionen. Pausiert per
-  `Read-Host` NACH dem Anlegen der leeren Archiv-Tabelle, BEVOR mit Partitionierung
-  (`Invoke-sqmTableArchiveMigration`) bzw. dem Kopieren der Partitionsdaten
-  (`Invoke-sqmPartitionArchive`) fortgefahren wird. Bei Ablehnung: sauberer Abbruch, nichts geht
-  verloren (bei `Invoke-sqmPartitionArchive` ist die Partition zu diesem Zeitpunkt bereits per
-  SWITCH in die Staging-Tabelle verschoben und bleibt dort bis zur manuellen Pruefung).
-- Beide Parameter sind rein additiv (Standardwerte = bisheriges Verhalten unveraendert) - keine
-  Breaking Changes fuer bestehende Aufrufe/Jobs.
-- **Hinweis**: keine vorhandene "Handvoll-Datensaetze"-Testfunktion in diesem Modul gefunden
-  (Recherche vor der Umsetzung) - falls das anderswo existiert, war es nicht Teil dieses Moduls.
+    AFTER partitioning (applies to all partitions).
+  - `Invoke-sqmPartitionArchive`: `REBUILD WITH (DATA_COMPRESSION = ...)` directly after the
+    `SELECT INTO` (the archive table here is not partitioned).
+- **`-ConfirmArchiveTable`** (switch, off by default) on both functions. Pauses via `Read-Host`
+  AFTER creating the empty archive table, BEFORE proceeding with partitioning
+  (`Invoke-sqmTableArchiveMigration`) or copying the partition data (`Invoke-sqmPartitionArchive`).
+  On rejection: a clean abort, nothing is lost (with `Invoke-sqmPartitionArchive` the partition
+  has at this point already been moved into the staging table via SWITCH and stays there for
+  manual review).
+- Both parameters are purely additive (default values = previous behavior unchanged) - no
+  breaking changes for existing calls/jobs.
+- **Note**: no existing "handful of rows" test function was found in this module (researched
+  before implementation) - if that exists elsewhere, it wasn't part of this module.
 
 ## [1.5.0.0] — 2026-07-04
 
-### Neue Funktion: `Invoke-sqmTableArchiveMigration`
+### New function: `Invoke-sqmTableArchiveMigration`
 
-Ergaenzung fuer den Fall, dass eine noch nicht partitionierte, weiterhin aktive Tabelle NICHT
-in der eigentlichen Datenbank partitioniert werden soll (dafuer bleibt
-`Invoke-sqmTablePartitionConversion` zustaendig), sondern schrittweise als partitionierte Kopie
-in eine separate, vom Admin bereits angelegte Archiv-Datenbank ueberfuehrt wird - monatsweise
-(YYYYMM) per T-SQL `MERGE`, ohne die Quelltabelle anzufassen oder zu loeschen:
+Addition for the case where a not-yet-partitioned, still-active table should NOT be partitioned
+in the actual database (that remains the job of `Invoke-sqmTablePartitionConversion`), but
+instead moved step by step as a partitioned copy into a separate archive database already set up
+by the admin - month by month (YYYYMM) via T-SQL `MERGE`, without touching or deleting the source
+table:
 
-- Legt bei Bedarf eine leere Strukturkopie der Tabelle in der Archiv-Datenbank an und
-  partitioniert sie ueber die bestehende `Invoke-sqmTablePartitionConversion`-Logik
-  (`-ManualStartValue`/`-ManualEndValue` aus dem tatsaechlichen Wertebereich der Quelle, da die
-  Kopie selbst leer ist) - keine Duplizierung der Partitionierungslogik.
-- Neue, eigene Infrastruktur **in der Quelldatenbank** (bewusst nicht in `master`, da an ein
-  einzelnes Migrationsprojekt gebunden): `dbo.sqm_ArchiveMonthLog` (Fortschritts-Log, eine Zeile
-  je Monat mit Fortsetzpunkt `LastKeyProcessed`) und `dbo.sqm_ArchiveMonthBatch` (Batch-Prozedur,
-  `MERGE` mit `WHEN MATCHED THEN UPDATE` / `WHEN NOT MATCHED THEN INSERT`). Neuer, eigener
-  Installer `Install-sqmArchiveMigrationInfra` (liest `sql\archive\*.sql`, deployed nach
-  `-Database` statt `master` - getrennt vom bestehenden `Install-sqmPartitionMaintenanceProcs`,
-  das ausschliesslich `master` bedient).
-- Jeder Batch-Aufruf ist durch `MERGE` beliebig oft wiederholbar (keine Duplikate, auch nicht bei
-  bereits archivierten, seither in der Quelle geaenderten Zeilen). Der Fortsetzpunkt liegt
-  dauerhaft in `sqm_ArchiveMonthLog`, nicht im Funktionsaufruf - ein Abbruch an beliebiger Stelle
-  (Netzwerk, Prozess-Kill) verliert nichts, ein erneuter Aufruf setzt exakt dort fort.
-- Der laufende (noch "offene") Kalendermonat wird standardmaessig NICHT migriert
-  (`-EndPeriod`-Default: Vormonat), um zu vermeiden, dass ein Monat als "abgeschlossen" geloggt
-  wird, waehrend die Quelle darin noch aktiv schreibt.
-- Loeschen der Quelldaten ist bewusst NICHT Teil dieser Funktion - das bleibt eine spaetere,
-  manuelle Admin-Entscheidung nach vollstaendigem Abschluss der Migration.
+- Creates an empty structural copy of the table in the archive database if needed and partitions
+  it via the existing `Invoke-sqmTablePartitionConversion` logic (`-ManualStartValue`/
+  `-ManualEndValue` from the source's actual value range, since the copy itself is empty) - no
+  duplication of the partitioning logic.
+- New, dedicated infrastructure **in the source database** (deliberately not in `master`, since
+  it's tied to a single migration project): `dbo.sqm_ArchiveMonthLog` (progress log, one row per
+  month with a resume point `LastKeyProcessed`) and `dbo.sqm_ArchiveMonthBatch` (batch procedure,
+  `MERGE` with `WHEN MATCHED THEN UPDATE` / `WHEN NOT MATCHED THEN INSERT`). New, dedicated
+  installer `Install-sqmArchiveMigrationInfra` (reads `sql\archive\*.sql`, deploys to `-Database`
+  instead of `master` - separate from the existing `Install-sqmPartitionMaintenanceProcs`, which
+  serves `master` exclusively).
+- Every batch call is repeatable any number of times via `MERGE` (no duplicates, even for rows
+  already archived and since changed in the source). The resume point lives permanently in
+  `sqm_ArchiveMonthLog`, not in the function call - an abort at any point (network, process kill)
+  loses nothing, a repeat call resumes exactly there.
+- The current (still "open") calendar month is NOT migrated by default (`-EndPeriod` default:
+  previous month), to avoid a month being logged as "complete" while the source is still actively
+  writing to it.
+- Deleting the source data is deliberately NOT part of this function - that remains a later,
+  manual admin decision after the migration is fully complete.
 
 ## [1.4.1.0] — 2026-07-04
 
-### Text-Support für YYYYMMDD-Format (DEV03-Seitig, spaeter durch [1.4.0.0]/DEV02 ersetzt)
+### Text support for YYYYMMDD format (DEV03 side, later replaced by [1.4.0.0]/DEV02)
 
-- **`Get-sqmPartitionBoundaryList`**: Neuer BoundaryType `Text` für VARCHAR/NVARCHAR-Spalten mit
-  YYYYMMDD-String-Format (z.B. '20240115'). Liefert Boundaries als Strings statt als Int/DateTime.
-- **`Invoke-sqmTablePartitionConversion`**: Validierung und automatische Typ-Erkennung erweitert
-  (varchar/nvarchar -> BoundaryType 'Text'). Warnung, wenn BoundaryType nicht zum Spaltentyp passt.
-- **`Register-sqmPartitionTable`**: BoundaryType-Parameter aktualisiert.
-- **Alle Funktionen**: Vollständig getestet auf DEV03 mit Text/Int/Date-Beispielen.
-- Unabhaengig von [1.4.0.0] (DEV02) entstanden, bevor beide Aenderungsstraenge zusammengefuehrt
-  wurden (siehe [1.7.0.0]) - deckte nur YYYYMMDD ab, kein konfigurierbares `-SurrogateDateFormat`.
+- **`Get-sqmPartitionBoundaryList`**: new BoundaryType `Text` for VARCHAR/NVARCHAR columns with a
+  YYYYMMDD string format (e.g. '20240115'). Returns boundaries as strings instead of Int/DateTime.
+- **`Invoke-sqmTablePartitionConversion`**: validation and automatic type detection extended
+  (varchar/nvarchar -> BoundaryType 'Text'). Warning if BoundaryType doesn't match the column
+  type.
+- **`Register-sqmPartitionTable`**: BoundaryType parameter updated.
+- **All functions**: fully tested on DEV03 with Text/Int/Date examples.
+- Developed independently of [1.4.0.0] (DEV02), before the two lines of changes were merged (see
+  [1.7.0.0]) - only covered YYYYMMDD, no configurable `-SurrogateDateFormat`.
 
 ## [1.4.0.0] — 2026-07-03
 
-### Varchar-Surrogatschluessel (BoundaryType 'Text') + konfigurierbares yyyyMM-Format
+### Varchar surrogate keys (BoundaryType 'Text') + configurable yyyyMM format
 
-- Bisher deckte `BoundaryType 'Int'` nur numerische YYYYMMDD-Surrogatschluessel ab. Manche Projekte
-  fuehren dasselbe Datumsformat aber als `char`/`varchar`-Spalte, und/oder nur auf Monatsebene
-  (YYYYMM statt YYYYMMDD). Beides wird jetzt unterstuetzt:
-  - Neuer `BoundaryType`-Wert `'Text'` (zusaetzlich zu `'Date'`/`'Int'`) fuer
-    `char`/`varchar`/`nchar`/`nvarchar`-Surrogatschluessel.
-  - Neuer Parameter `-SurrogateDateFormat` (`'yyyyMMdd'` Standard oder `'yyyyMM'`) fuer
-    `Get-sqmPartitionBoundaryList`, `Invoke-sqmTablePartitionConversion` und
-    `Register-sqmPartitionTable` - steuert, ob der Surrogatschluessel Tages- oder nur
-    Monatsgenauigkeit hat.
-  - `Invoke-sqmTablePartitionConversion` erkennt `BoundaryType` weiterhin automatisch aus dem
-    Spaltentyp, wenn nicht angegeben: Datumstypen -> `Date`, `int`/`bigint`/`smallint`/`tinyint` ->
-    `Int`, `char`/`varchar`/`nchar`/`nvarchar` -> `Text`. Der `SqlDataType`, der in die
-    `CREATE PARTITION FUNCTION`-DDL einfliesst, wird fuer Text-Typen jetzt mit der tatsaechlichen
-    Spaltenlaenge gebildet (z.B. `varchar(6)`), vorher waere ein unlaengenspezifiziertes `varchar`
-    (implizit `varchar(1)`) verwendet worden.
-  - `New-sqmPartitionSchemeSet` quotet `[string]`-Boundary-Werte jetzt als `N'...'`-Literale in der
-    `CREATE PARTITION FUNCTION ... VALUES (...)`-DDL.
-  - `sqm_ExtendPartitionWindow` (T-SQL-Wartungsprozedur): liest `SurrogateDateFormat` jetzt aus der
-    Registry und parst/erzeugt Boundary-Werte format- und typabhaengig (yyyyMM hat keinen passenden
-    `CONVERT`-Style und wird manuell aus Jahr/Monat zusammengesetzt; `Text`-Literale werden gequotet,
-    `Int`-Literale nicht).
-  - `Invoke-sqmPartitionRetentionSweep.ps1` (Retention-Job): der Cutoff-Vergleich castete den rohen
-    Boundary-Wert bisher blind als `[datetime]` - das war fuer `BoundaryType 'Date'` korrekt, fuer
-    `'Int'`/`'Text'` aber ein Fehlcast (ein Wert wie `20240115` als `[datetime]` interpretiert landet
-    als OLE-Automation-Datumsserial, nicht als 15.01.2024). Parst jetzt formatabhaengig ueber
+- So far `BoundaryType 'Int'` only covered numeric YYYYMMDD surrogate keys. Some projects use the
+  same date format but as a `char`/`varchar` column, and/or only at month granularity (YYYYMM
+  instead of YYYYMMDD). Both are now supported:
+  - New `BoundaryType` value `'Text'` (in addition to `'Date'`/`'Int'`) for
+    `char`/`varchar`/`nchar`/`nvarchar` surrogate keys.
+  - New parameter `-SurrogateDateFormat` (`'yyyyMMdd'` default or `'yyyyMM'`) for
+    `Get-sqmPartitionBoundaryList`, `Invoke-sqmTablePartitionConversion` and
+    `Register-sqmPartitionTable` - controls whether the surrogate key has day or only month
+    precision.
+  - `Invoke-sqmTablePartitionConversion` still automatically detects `BoundaryType` from the
+    column type when not specified: date types -> `Date`, `int`/`bigint`/`smallint`/`tinyint` ->
+    `Int`, `char`/`varchar`/`nchar`/`nvarchar` -> `Text`. The `SqlDataType` that flows into the
+    `CREATE PARTITION FUNCTION` DDL is now built with the actual column length for text types
+    (e.g. `varchar(6)`); previously an unlength-specified `varchar` (implicitly `varchar(1)`)
+    would have been used.
+  - `New-sqmPartitionSchemeSet` now quotes `[string]` boundary values as `N'...'` literals in the
+    `CREATE PARTITION FUNCTION ... VALUES (...)` DDL.
+  - `sqm_ExtendPartitionWindow` (T-SQL maintenance procedure): now reads `SurrogateDateFormat`
+    from the registry and parses/builds boundary values depending on format and type (yyyyMM has
+    no matching `CONVERT` style and is manually assembled from year/month; `Text` literals are
+    quoted, `Int` literals are not).
+  - `Invoke-sqmPartitionRetentionSweep.ps1` (retention job): the cutoff comparison previously cast
+    the raw boundary value blindly as `[datetime]` - correct for `BoundaryType 'Date'`, but a
+    miscast for `'Int'`/`'Text'` (a value like `20240115` interpreted as `[datetime]` ends up as
+    an OLE Automation date serial, not as Jan 15, 2024). Now parses depending on format via
     `[datetime]::ParseExact`.
-  - `Invoke-sqmPartitionArchive` (`MERGE RANGE`-DDL): `[string]`-Boundary-Werte werden jetzt als
-    `N'...'`-Literal gequotet statt sich auf implizite int->varchar-Konvertierung zu verlassen.
-  - `Show-sqmPartitionToolGui`: Schritt 4 (Granularitaet) zeigt bei Nicht-Datumsspalten zusaetzlich
-    eine `Surrogate Date Format`-Auswahl (`yyyyMMdd`/`yyyyMM`).
-  - `sqm_PartitionRegistry`: neue Spalte `SurrogateDateFormat` (mit `ALTER TABLE ... ADD`-
-    Migrationspfad fuer bereits bestehende Installationen).
-- Auf DEV02 end-to-end verifiziert: je eine Testtabelle mit `varchar(6)`-Spalte (`BoundaryType Text`)
-  und `int`-Spalte (`BoundaryType Int`), beide im `yyyyMM`-Format - vollstaendiger Zyklus
-  Konvertierung -> `sqm_ExtendPartitionWindow` (inkl. Idempotenz-Rerun) -> Retention-Sweep
-  (`Invoke-sqmPartitionRetentionSweep.ps1`) lief in beiden Faellen fehlerfrei durch, Boundary-Werte
-  und retirierte Partitionen wurden stichprobenartig gegen `sys.partition_range_values` geprueft.
+  - `Invoke-sqmPartitionArchive` (`MERGE RANGE` DDL): `[string]` boundary values are now quoted as
+    `N'...'` literals instead of relying on implicit int->varchar conversion.
+  - `Show-sqmPartitionToolGui`: step 4 (granularity) additionally shows a `Surrogate Date Format`
+    selector (`yyyyMMdd`/`yyyyMM`) for non-date columns.
+  - `sqm_PartitionRegistry`: new column `SurrogateDateFormat` (with an `ALTER TABLE ... ADD`
+    migration path for already-existing installations).
+- Verified end-to-end on DEV02: one test table each with a `varchar(6)` column (`BoundaryType
+  Text`) and an `int` column (`BoundaryType Int`), both in `yyyyMM` format - the full cycle
+  conversion -> `sqm_ExtendPartitionWindow` (including an idempotency re-run) -> retention sweep
+  (`Invoke-sqmPartitionRetentionSweep.ps1`) ran through without errors in both cases; boundary
+  values and retired partitions were spot-checked against `sys.partition_range_values`.
 
 ## [1.3.0.0] — 2026-07-03
 
-### GUI auf Englisch umgestellt
+### Switched the GUI to English
 
-- **`Show-sqmPartitionToolGui`**: Alle sichtbaren GUI-Texte (Schritt-Titel, Fenstertitel,
-  Feldbeschriftungen, Buttons, Grid-Spaltenkoepfe, Statusmeldungen, Bestaetigungs-/Fehler-Dialoge)
-  von Deutsch auf Englisch umgestellt - der fruehere "de-DE statt en-US"-Fix (1.2.1.0) betraf nur
-  Zahlen-/Datumsformatierung, nicht die eigentliche GUI-Sprache. Code-Kommentare und
-  `Invoke-sqmLogging`-Meldungen bleiben bewusst Deutsch (konsistent mit dem restlichen Projekt -
-  nur die sichtbare Oberflaeche wurde umgestellt).
-- Interne Spalten-`Name`-Bezeichner (fuer `$row.Cells['...']`-Zugriffe im Code) unveraendert
-  gelassen, nur die angezeigten `HeaderText`-Werte uebersetzt - keine Logik-Aenderung noetig.
-  Zellwerte, die als Vergleichswerte im Code verwendet werden (z.B. Status "already partitioned"
-  statt "bereits partitioniert", Kompatibel-Spalte "Yes" statt "Ja"), wurden konsistent an beiden
-  Stellen (Anzeige UND Vergleich) angepasst.
-- Auf DEV02 interaktiv durchgeklickt (Verbindung -> Tabelle waehlen -> Zusammenfassung): alle
-  Texte korrekt Englisch, Dezimalwerte weiterhin mit Punkt (z.B. "0.42" MB).
+- **`Show-sqmPartitionToolGui`**: all visible GUI text (step titles, window title, field labels,
+  buttons, grid column headers, status messages, confirmation/error dialogs) switched from German
+  to English - the earlier "de-DE instead of en-US" fix (1.2.1.0) only affected number/date
+  formatting, not the GUI's actual language. Code comments and `Invoke-sqmLogging` messages
+  remain deliberately German (consistent with the rest of the project - only the visible
+  interface was switched).
+- Internal column `Name` identifiers (for `$row.Cells['...']` access in code) left unchanged,
+  only the displayed `HeaderText` values were translated - no logic change needed. Cell values
+  used as comparison values in code (e.g. status "already partitioned" instead of "bereits
+  partitioniert", the compatible column "Yes" instead of "Ja") were updated consistently in both
+  places (display AND comparison).
+- Clicked through interactively on DEV02 (connection -> select table -> summary): all text
+  correctly in English, decimal values still with a dot (e.g. "0.42" MB).
 
 ## [1.2.1.0] — 2026-07-03
 
-### Fixes nach weiterem Feedback
+### Fixes after further feedback
 
-- **`sqmSQLTool.psd1` Mindestversion erzwungen**: `RequiredModules` verlangt jetzt explizit
-  `sqmSQLTool >= 1.9.2.0` (die Version, in der `Get-sqmSaLogin` exportiert wurde, das
-  `New-sqmPartitionExtendJob`/`-RetentionJob` benoetigen). Vorher wurde eine aeltere, bereits
-  installierte sqmSQLTool-Version klaglos geladen und der Fehler erst spaeter mit einer
-  verwirrenden "Get-sqmSaLogin nicht erkannt"-Meldung sichtbar (Ursache des zuvor gemeldeten
-  "Schritt 2 zeigt keine Tabellen"-Falls). `Install.ps1` prueft die installierte
-  sqmSQLTool-Version jetzt zusaetzlich explizit und warnt mit klarer Anleitung, falls sie zu alt
-  ist.
-- **Fix `Show-sqmPartitionToolGui`**: `SizeMB` (Dezimalwert) wurde direkt an die
-  Tabellen-Auswahl-Grid uebergeben - .NET rendert `[decimal]`-Werte ohne explizite Formatierung
-  mit dem Dezimaltrennzeichen der Thread-Culture, unter de-DE also mit Komma statt Punkt (z.B.
-  "12,34" statt "12.34"), obwohl die restliche GUI-Anzeige unzweideutig sein sollte.
-  `_FormatDisplayValue` formatiert jetzt auch Dezimalwerte explizit mit `InvariantCulture`, nicht
-  nur Datumswerte wie zuvor. Verifiziert: unter simulierter de-DE-Culture liefert
-  `(12.34).ToString()` weiterhin "12,34", der Fix liefert korrekt "12.34".
+- **Enforced a minimum version of `sqmSQLTool.psd1`**: `RequiredModules` now explicitly requires
+  `sqmSQLTool >= 1.9.2.0` (the version in which `Get-sqmSaLogin` was exported, which
+  `New-sqmPartitionExtendJob`/`-RetentionJob` need). Previously an older, already-installed
+  sqmSQLTool version was loaded without complaint and the error only became visible later with a
+  confusing "Get-sqmSaLogin not recognized" message (the root cause of the previously reported
+  "step 2 shows no tables" case). `Install.ps1` now also explicitly checks the installed
+  sqmSQLTool version and warns with clear guidance if it's too old.
+- **Fix `Show-sqmPartitionToolGui`**: `SizeMB` (a decimal value) was passed directly to the
+  table-selection grid - .NET renders `[decimal]` values without explicit formatting using the
+  thread culture's decimal separator, so under de-DE with a comma instead of a dot (e.g. "12,34"
+  instead of "12.34"), even though the rest of the GUI display should be unambiguous.
+  `_FormatDisplayValue` now also explicitly formats decimal values with `InvariantCulture`, not
+  just date values as before. Verified: under a simulated de-DE culture, `(12.34).ToString()`
+  still returns "12,34", the fix correctly returns "12.34".
 
 ## [1.2.0.0] — 2026-07-03
 
-### Neue Funktion: `Invoke-sqmTableRelocation`
+### New function: `Invoke-sqmTableRelocation`
 
-Ergaenzung nach Feedback zur bestehenden Archiv-Funktionalitaet: `Invoke-sqmPartitionArchive`
-verschiebt fortlaufend nur ABGELAUFENE PARTITIONEN einer weiterhin aktiven, partitionierten
-Tabelle. Fuer die einmalige, vollstaendige Auslagerung einer kompletten (typischerweise sehr
-grossen) Tabelle in eine separate Datenbank gibt es jetzt `Invoke-sqmTableRelocation`:
+Addition after feedback on the existing archive functionality: `Invoke-sqmPartitionArchive`
+continuously moves only EXPIRED PARTITIONS of a still-active, partitioned table. For the
+one-time, complete relocation of an entire (typically very large) table into a separate database,
+there is now `Invoke-sqmTableRelocation`:
 
-- Batchweise, NICHT-destruktive Kopie (Quelltabelle bleibt bis zum Abschluss vollstaendig
-  unveraendert bestehen, jeder Batch eine eigene kleine Transaktion - Transaktionslog waechst
-  nicht unkontrolliert).
-- Fortsetzbar/resumable: liest bei jedem Aufruf den tatsaechlichen Fortschritt (MAX der
-  Schluesselspalte im Ziel) und macht dort weiter - `-MaxDurationMinutes` erlaubt die gezielte
-  Aufteilung sehr grosser Tabellen auf mehrere Wartungsfenster.
-- Cutover erst nach vollstaendigem, verifiziertem Zeilenzahl-Abgleich: Original-Tabelle wird
-  umbenannt (Sicherheitsnetz, bleibt vollstaendig erhalten), danach ein View mit dem
-  urspruenglichen Tabellennamen angelegt, der per Cross-DB-Query auf die Zieltabelle zeigt -
-  bestehende Abfragen/Reports laufen unveraendert weiter.
-- Auf DEV02 verifiziert: 275 Zeilen in Batches von 100 verschoben, View liefert transparent
-  dieselben Daten, umbenannte Original-Tabelle bleibt vollstaendig unangetastet (275 Zeilen).
-- Zwei Bugs waehrend der Tests gefunden und behoben: (1) `MAX()` ueber eine leere Zieltabelle
-  liefert `[System.DBNull]::Value`, nicht PowerShells `$null` - ohne Sonderbehandlung entstand
-  eine leere, syntaktisch ungueltige `WHERE`-Klausel (`WHERE [Id] > `). (2) Einzeiliges
-  `Invoke-DbaQuery`-Ergebnis ist ein einzelnes `System.Data.DataRow`-Objekt statt eines Arrays -
-  `$result[0]` ruft dann DataRows EIGENEN Spalten-Indexer auf (liefert den Wert der ersten Spalte
-  statt des Objekts selbst); `.ColumnName` darauf lieferte lautlos `$null` statt eines Fehlers.
-  Fix: Ergebnis explizit mit `@(...)` in Array-Kontext zwingen vor dem Indizieren.
+- Batch-wise, NON-destructive copy (the source table remains fully unchanged until completion,
+  each batch its own small transaction - the transaction log doesn't grow uncontrollably).
+- Resumable: on every call reads the actual progress (MAX of the key column in the target) and
+  continues from there - `-MaxDurationMinutes` allows deliberately splitting very large tables
+  across multiple maintenance windows.
+- Cutover only after a complete, verified row-count reconciliation: the original table is renamed
+  (a safety net, fully preserved), then a view is created under the original table name that
+  points to the target table via a cross-DB query - existing queries/reports keep running
+  unchanged.
+- Verified on DEV02: 275 rows moved in batches of 100, the view transparently returns the same
+  data, the renamed original table remains completely untouched (275 rows).
+- Two bugs found and fixed during testing: (1) `MAX()` over an empty target table returns
+  `[System.DBNull]::Value`, not PowerShell's `$null` - without special handling this produced an
+  empty, syntactically invalid `WHERE` clause (`WHERE [Id] > `). (2) a single-row
+  `Invoke-DbaQuery` result is a single `System.Data.DataRow` object instead of an array -
+  `$result[0]` then invokes the DataRow's OWN column indexer (returns the value of the first
+  column instead of the object itself); `.ColumnName` on that silently returned `$null` instead
+  of an error. Fix: explicitly force the result into array context with `@(...)` before indexing.
 
 ## [1.1.1.0] — 2026-07-03
 
-### Feedback nach GUI-Review umgesetzt
+### Feedback from the GUI review implemented
 
-- **Fix `Show-sqmPartitionToolGui`**: Datumswerte (Min/Max-Vorschau, Boundary-Vorschau) wurden mit
-  dem Standard-`ToString()` angezeigt, dessen Format von der Session-/System-Culture abhaengt
-  (z.B. `06/16/2026` im en-US-Stil vs. `16.06.2026` im de-DE-Stil) - beim Durchklicken dieser
-  Session tatsaechlich einmal falsch gelesen worden (verwechselt mit einem anderen Datum). Neue
-  `_FormatDisplayValue`-Hilfsfunktion zeigt Datumswerte jetzt immer unzweideutig als
-  `yyyy-MM-dd` (invariante Culture) an.
-- **Erweiterung `Invoke-sqmPartitionArchive`**: `-ArchiveBatchSize` war bisher ein
-  wirkungsloser Parameter - die Archiv-Kopie lief immer als einzelne `INSERT...SELECT` in einer
-  Transaktion (Risiko bei sehr grossen Partitionen: Transaktionslog-Wachstum, lange Sperren,
-  Timeouts). Kopiert jetzt in Batches (`DELETE TOP (@BatchSize) ... OUTPUT INTO`, je eine eigene
-  Transaktion), sobald die Partition mehr Zeilen als `-ArchiveBatchSize` enthaelt. Auf DEV02
-  verifiziert (31 Zeilen, ArchiveBatchSize=15 -> 3 Batches, alle Zeilen inkl. IDENTITY-Werte
-  korrekt uebernommen).
+- **Fix `Show-sqmPartitionToolGui`**: date values (Min/Max preview, boundary preview) were shown
+  with the default `ToString()`, whose format depends on the session/system culture (e.g.
+  `06/16/2026` in en-US style vs. `16.06.2026` in de-DE style) - actually misread once while
+  clicking through this session (confused with a different date). A new `_FormatDisplayValue`
+  helper function now always shows date values unambiguously as `yyyy-MM-dd` (invariant culture).
+- **Enhancement `Invoke-sqmPartitionArchive`**: `-ArchiveBatchSize` was previously an ineffective
+  parameter - the archive copy always ran as a single `INSERT...SELECT` in one transaction (risk
+  for very large partitions: transaction-log growth, long locks, timeouts). Now copies in batches
+  (`DELETE TOP (@BatchSize) ... OUTPUT INTO`, each its own transaction) once the partition
+  contains more rows than `-ArchiveBatchSize`. Verified on DEV02 (31 rows, ArchiveBatchSize=15 ->
+  3 batches, all rows including IDENTITY values correctly carried over).
 
 ## [1.1.0.0] — 2026-07-03
 
-### GUI-Wizard gebaut, kritischer Quarter-Boundary-Bug gefunden und behoben
+### GUI wizard built, critical quarter-boundary bug found and fixed
 
-- `Public/Show-sqmPartitionToolGui.ps1` - neuer 8-Schritte-Assistent (Verbindung -> Tabelle ->
-  Spalte -> Min/Max -> Granularitaet/Filegroups -> Boundary-Vorschau -> Archiv/Retention ->
-  Zusammenfassung/Ausfuehren), reiner Wrapper um bestehende Core-Funktionen, Dark-Theme
-  identisch zu `Show-sqmBackupExcludeForm` (sqmSQLTool). Interaktiv auf DEV02 durchgeklickt.
-- **Kritischer Fix `Get-sqmPartitionBoundaryList`**: `Granularity Quarter` berechnete beim
-  Durchklicken der GUI (Schritt 6, Boundary-Vorschau) falsche Quartals-Grenzen - beim
-  Testtabelle-Datum 16.06.2026 (Q2) wurde die erste Zukunfts-Puffer-Periode faelschlich erst bei
-  Q4/2026 statt Q3/2026 markiert. Ursache: `[int](($date.Month - 1) / 3)` - PowerShells `/` ist
-  IMMER Fliesskomma-Division (anders als in T-SQL/C mit int-Operanden) und `[int]`-Cast RUNDET
-  (statt abzuschneiden), z.B. `[int](5/3)` ergibt `2`, nicht `1`. Betraf die letzten Monate jedes
-  Quartals (Maerz/Juni/September/Dezember) - bei Dezember waere sogar Monat 13 entstanden
-  (`[datetime]::new(...,13,1)` wirft eine Exception). Fix: `[math]::Floor(($date.Month-1)/3.0)`
-  statt `[int](...)`. Betraf `_PeriodStart` UND `_PeriodLabel` (beide Male derselbe Fehler).
-  Verifiziert: urspruenglicher Fall (16.06.2026) liefert jetzt korrekt Q3/2026 als ersten
-  Puffer, Dezember-Randfall (vorher potenzielle Exception) laeuft jetzt fehlerfrei durch.
-  **Hinweis**: bereits durchgefuehrte Konvertierungen in dieser Session (TestOrdersPK,
-  TestOrdersHeap) nutzten `Granularity Month`, nicht `Quarter` - nicht vom Bug betroffen, keine
-  Nacharbeit noetig.
-- **Zweiter kritischer Fix `Get-sqmPartitionStatus`**: die Spalte `LowerBoundaryValue` enthielt
-  tatsaechlich die OBERE Grenze jeder Partition (SQL-Join `prv.boundary_id = p.partition_number`
-  statt `p.partition_number - 1`) - Partition 1 zeigte faelschlich einen Wert statt NULL/
-  unendlich. `Invoke-sqmPartitionArchive`s `MERGE RANGE` nutzte diese Spalte fuer den
-  Boundary-Wert und funktionierte nur zufaellig richtig, weil der (falsch benannte) Wert
-  tatsaechlich der fuer MERGE RANGE benoetigte war. Die Retention-Sweep-Logik
-  (`Invoke-sqmPartitionRetentionSweep.ps1`) las dagegen `$status[i+1].LowerBoundaryValue` in der
-  Annahme korrekter Semantik - mit der fehlerhaften Spalte ein Boundary zu weit, was bei knapp an
-  einer Periodengrenze liegenden Cutoffs zu falschen Retire-Entscheidungen fuehren konnte (durch
-  den grosszuegigen Testabstand in den bisherigen Tests dieser Session nicht sichtbar geworden).
-  Fix: `Get-sqmPartitionStatus` liefert jetzt explizit sowohl `LowerBoundaryValue` (echte untere
-  Grenze, NULL bei Partition 1) als auch `UpperBoundaryValue` (echte obere Grenze, NULL bei der
-  letzten/Zukunfts-Partition) als eigene Spalten - kein Aufrufer muss mehr ueber Nachbar-Zeilen
-  ruckschliessen. `Invoke-sqmPartitionArchive` nutzt jetzt `UpperBoundaryValue` fuer MERGE RANGE,
-  die Retention-Sweep nutzt `$oldest.UpperBoundaryValue` direkt. Verifiziert auf DEV02: korrekte
-  Grenzen fuer alle 14 Partitionen (Partition 1 zeigt jetzt korrekt KEINE untere Grenze), Retire
-  von Partition 2 verschmilzt die richtige Boundary (269 von 300 Zeilen korrekt erhalten).
+- `Public/Show-sqmPartitionToolGui.ps1` - new 8-step wizard (Connection -> Table -> Column ->
+  Min/Max -> Granularity/Filegroups -> Boundary preview -> Archive/Retention ->
+  Summary/Execute), a pure wrapper around existing core functions, dark theme identical to
+  `Show-sqmBackupExcludeForm` (sqmSQLTool). Clicked through interactively on DEV02.
+- **Critical fix `Get-sqmPartitionBoundaryList`**: `Granularity Quarter` computed incorrect
+  quarter boundaries while clicking through the GUI (step 6, boundary preview) - for the test
+  table date 2026-06-16 (Q2), the first future buffer period was incorrectly flagged as only
+  starting at Q4/2026 instead of Q3/2026. Cause: `[int](($date.Month - 1) / 3)` - PowerShell's `/`
+  is ALWAYS floating-point division (unlike T-SQL/C with int operands) and the `[int]` cast
+  ROUNDS (instead of truncating), e.g. `[int](5/3)` gives `2`, not `1`. Affected the last month of
+  every quarter (March/June/September/December) - for December, this would even have produced
+  month 13 (`[datetime]::new(...,13,1)` throws an exception). Fix:
+  `[math]::Floor(($date.Month-1)/3.0)` instead of `[int](...)`. Affected both `_PeriodStart` AND
+  `_PeriodLabel` (same bug in both places). Verified: the original case (2026-06-16) now
+  correctly returns Q3/2026 as the first buffer, the December edge case (previously a potential
+  exception) now runs through without error. **Note**: conversions already performed in this
+  session (TestOrdersPK, TestOrdersHeap) used `Granularity Month`, not `Quarter` - not affected by
+  the bug, no rework needed.
+- **Second critical fix `Get-sqmPartitionStatus`**: the `LowerBoundaryValue` column actually
+  contained the UPPER boundary of every partition (SQL join `prv.boundary_id =
+  p.partition_number` instead of `p.partition_number - 1`) - partition 1 incorrectly showed a
+  value instead of NULL/infinity. `Invoke-sqmPartitionArchive`'s `MERGE RANGE` used this column
+  for the boundary value and only worked correctly by coincidence, because the (mis-named) value
+  happened to be the one actually needed for MERGE RANGE. The retention sweep logic
+  (`Invoke-sqmPartitionRetentionSweep.ps1`), on the other hand, read
+  `$status[i+1].LowerBoundaryValue` assuming correct semantics - with the buggy column, one
+  boundary too far, which could lead to incorrect retire decisions for cutoffs sitting close to a
+  period boundary (not visible so far due to the generous test margins used in this session's
+  previous tests). Fix: `Get-sqmPartitionStatus` now explicitly returns both
+  `LowerBoundaryValue` (the true lower boundary, NULL for partition 1) and `UpperBoundaryValue`
+  (the true upper boundary, NULL for the last/future partition) as separate columns - no caller
+  needs to infer this from neighboring rows anymore. `Invoke-sqmPartitionArchive` now uses
+  `UpperBoundaryValue` for MERGE RANGE, the retention sweep uses `$oldest.UpperBoundaryValue`
+  directly. Verified on DEV02: correct boundaries for all 14 partitions (partition 1 now
+  correctly shows NO lower boundary), retiring partition 2 merges the correct boundary (269 of
+  300 rows correctly retained).
 
-### Wartungs-Jobs implementiert
+### Maintenance jobs implemented
 
-- `sql/sqm_ExtendPartitionWindow.proc.sql` - instanzweite Prozedur, erweitert das Sliding
-  Window aller aktiven Registry-Eintraege (nur FilegroupStrategy 'Single' automatisch,
-  siehe Kommentar in der Datei). Fix: `EXEC()` akzeptiert keinen Ausdruck, der `QUOTENAME()`
-  direkt per String-Verkettung einbindet (Syntaxfehler trotz gueltigem Ausdruck bei SELECT) -
-  muss erst in eine Variable geschrieben werden. Fix: Off-by-one - die naechste zu ergaenzende
-  Periode liegt eine Periode NACH dem vorhandenen Max-Boundary, nicht bei ihm selbst (sonst
-  "doppelte Bereichsbegrenzungswerte"). Auf DEV02 verifiziert (28 Boundaries hinzugefuegt,
-  zweiter Lauf korrekt No-Op).
-- `jobs/Invoke-sqmPartitionRetentionSweep.ps1` - PowerShell-Skript (bewusst keine T-SQL-Prozedur,
-  siehe Kommentar in der Datei) fuer die woechentliche Retention/Archivierung, nutzt das bereits
-  getestete `Invoke-sqmPartitionArchive`. Fix: `Where-Object { $_.RetentionValue }` allein filtert
-  NULL-Werte (kommen aus SQL Server als `[DBNull]::Value` zurueck) nicht heraus - explizit auf
-  `-isnot [System.DBNull]` pruefen. Fix: Partitionsnummern verschieben sich nach jedem MERGE RANGE
-  (alle nachfolgenden Partitionen ruecken eine Nummer runter) - eine vorab geplante Liste von
-  PartitionNumber-Werten wird nach der ersten Entfernung ungueltig; Status wird jetzt jede
-  Iteration neu gelesen. Auf DEV02 verifiziert (13 Partitionen entfernt, alle 2000
-  Original-Zeilen korrekt im Archiv wiedergefunden).
-- `Public/New-sqmPartitionExtendJob.ps1`, `Public/New-sqmPartitionRetentionJob.ps1` - legen die
-  zwei instanzweiten SQL-Agent-Jobs an (taeglich/woechentlich), `-Update`-Schalter idempotent.
-  Auf DEV02 verifiziert (Create/AlreadyExists/Update fuer beide Jobs).
-- Export `Get-sqmSaLogin` aus sqmSQLTool ergaenzt (siehe dortiges CHANGELOG 1.9.2.0) - gleiche
-  Cross-Module-Sichtbarkeits-Einschraenkung wie bei `Invoke-sqmLogging`.
+- `sql/sqm_ExtendPartitionWindow.proc.sql` - instance-wide procedure, extends the sliding window
+  of all active registry entries (only FilegroupStrategy 'Single' automatically, see the comment
+  in the file). Fix: `EXEC()` doesn't accept an expression that inlines `QUOTENAME()` directly via
+  string concatenation (a syntax error despite a valid expression for SELECT) - it must first be
+  written into a variable. Fix: an off-by-one - the next period to add is one period AFTER the
+  existing max boundary, not at it (otherwise "duplicate range boundary values"). Verified on
+  DEV02 (28 boundaries added, second run correctly a no-op).
+- `jobs/Invoke-sqmPartitionRetentionSweep.ps1` - a PowerShell script (deliberately not a T-SQL
+  procedure, see the comment in the file) for the weekly retention/archiving, uses the
+  already-tested `Invoke-sqmPartitionArchive`. Fix: `Where-Object { $_.RetentionValue }` alone
+  doesn't filter out NULL values (returned from SQL Server as `[DBNull]::Value`) - explicitly
+  checks `-isnot [System.DBNull]`. Fix: partition numbers shift after every MERGE RANGE (all
+  subsequent partitions move down one number) - a list of PartitionNumber values planned ahead of
+  time becomes invalid after the first removal; the status is now re-read on every iteration.
+  Verified on DEV02 (13 partitions removed, all 2000 original rows correctly found again in the
+  archive).
+- `Public/New-sqmPartitionExtendJob.ps1`, `Public/New-sqmPartitionRetentionJob.ps1` - create the
+  two instance-wide SQL Agent jobs (daily/weekly), `-Update` switch idempotent. Verified on DEV02
+  (Create/AlreadyExists/Update for both jobs).
+- Added the export of `Get-sqmSaLogin` from sqmSQLTool (see its CHANGELOG 1.9.2.0) - the same
+  cross-module visibility restriction as with `Invoke-sqmLogging`.
 
-### Core-Konvertierungsfunktionen abgeschlossen
+### Core conversion functions completed
 
 - `Get-sqmPartitionCandidateTable`, `Get-sqmPartitionColumnCandidate`,
   `Get-sqmPartitionColumnRange`, `Get-sqmPartitionBoundaryList`,
@@ -545,35 +532,34 @@ grossen) Tabelle in eine separate Datenbank gibt es jetzt `Invoke-sqmTableReloca
   `Invoke-sqmTablePartitionConversion`, `Register-sqmPartitionTable`,
   `Get-sqmPartitionRegistry`, `Get-sqmPartitionStatus`,
   `Remove-sqmPartitionRegistration`, `Invoke-sqmPartitionArchive`
-  implementiert und auf DEV02 gegen PK- und Heap-Testtabellen verifiziert.
-- Fix `Invoke-sqmPartitionArchive`: SWITCH PARTITION schlug mit "kein
-  identischer Index" fehl, obwohl Spalten/Eindeutigkeit der Staging-Tabelle
-  strukturell identisch waren. Ursache (empirisch per Minimal-Repro
-  verifiziert): ist der Quell-Index als PRIMARY KEY/UNIQUE CONSTRAINT
-  hinterlegt, verlangt SQL Server auf der Staging-Tabelle ebenfalls einen
-  Constraint (nicht nur einen strukturgleichen einfachen Index). Betrifft
-  jetzt alle Indizes (nicht nur den Clustered Index) der Quelltabelle.
-- Fix `Invoke-sqmPartitionArchive`: IDENTITY-Eigenschaft wurde bei der
-  Staging-Tabellen-Erzeugung nicht übernommen (ebenfalls Pflicht für SWITCH
-  PARTITION).
-- Fix `Invoke-sqmPartitionArchive`: Archiv-Kopie schlug bei IDENTITY-Spalten
-  mit "IDENTITY_INSERT"-Fehler fehl - Kopie nutzt jetzt explizite Spaltenliste
-  und `SET IDENTITY_INSERT ON/OFF` wenn nötig.
-- Fix `Invoke-sqmPartitionArchive`: `Invoke-DbaQuery -ErrorAction Stop` warf
-  bei echten SQL-Server-Ausführungsfehlern keine terminierende Exception
-  (Ausführung lief mit einer Warnung weiter) - überall zusätzlich
-  `-EnableException` ergänzt.
-- Fix `Get-sqmPartitionStatus`: ungültige `return foreach (...)`-Syntax.
+  implemented and verified on DEV02 against PK and heap test tables.
+- Fix `Invoke-sqmPartitionArchive`: SWITCH PARTITION failed with "no matching
+  index", even though the staging table's columns/uniqueness were structurally
+  identical. Root cause (verified empirically via a minimal repro): if the
+  source index is defined as a PRIMARY KEY/UNIQUE CONSTRAINT, SQL Server
+  requires a constraint on the staging table too (not just a structurally
+  identical plain index). This now applies to all indexes of the source table
+  (not just the clustered index).
+- Fix `Invoke-sqmPartitionArchive`: the IDENTITY property wasn't carried over
+  when creating the staging table (also required for SWITCH PARTITION).
+- Fix `Invoke-sqmPartitionArchive`: the archive copy failed with an
+  "IDENTITY_INSERT" error for IDENTITY columns - the copy now uses an
+  explicit column list and `SET IDENTITY_INSERT ON/OFF` where needed.
+- Fix `Invoke-sqmPartitionArchive`: `Invoke-DbaQuery -ErrorAction Stop` didn't
+  throw a terminating exception on real SQL Server execution errors
+  (execution continued with just a warning) - added `-EnableException`
+  everywhere as well.
+- Fix `Get-sqmPartitionStatus`: invalid `return foreach (...)` syntax.
 
 ## [1.0.0.0] — 2026-07-03
 
-### Initiales Projekt
+### Initial project
 
-- Modul-Grundgerüst angelegt (psd1/psm1, Public/Private/sql/Docs/jobs/tests-
-  Struktur, RequiredModules `dbatools` + `sqmSQLTool`).
-- Konzept: `master.dbo.sqm_PartitionRegistry` als zentrale Metadaten-Tabelle
-  (eine Zeile pro registrierter Tabelle), zwei instanzweite SQL-Agent-Jobs
-  (`sqm_ExtendPartitionWindow`, `sqm_RetirePartitionWindow`) statt Job-pro-
-  Tabelle.
-- Weitere Funktionalität (Core-Konvertierung, Wartungs-Jobs, GUI-Assistent)
-  folgt in nachfolgenden Versionen — siehe Projektplan.
+- Basic module scaffold created (psd1/psm1, Public/Private/sql/Docs/jobs/tests
+  structure, RequiredModules `dbatools` + `sqmSQLTool`).
+- Concept: `master.dbo.sqm_PartitionRegistry` as a central metadata table
+  (one row per registered table), two instance-wide SQL Agent jobs
+  (`sqm_ExtendPartitionWindow`, `sqm_RetirePartitionWindow`) instead of a
+  job per table.
+- Further functionality (core conversion, maintenance jobs, GUI wizard)
+  follows in subsequent versions — see the project plan.
