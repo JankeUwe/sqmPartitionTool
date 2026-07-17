@@ -24,3 +24,8 @@ tests/testresults.xml
 *.user
 Thumbs.db
 desktop.ini
+
+# Marketing- und Website-Quellen (werden auf powershelldba.de deployed,
+# gehoeren nicht ins oeffentliche Repo)
+docs/marketing/
+docs/website/
