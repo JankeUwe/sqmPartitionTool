@@ -109,9 +109,14 @@ SELECT
 	}
 
 	# --- Boundary-Werte fuer die Function formatieren ------------------------------------------
+	# 'yyyyMMdd' (ohne Trennzeichen) statt 'yyyy-MM-dd': Letzteres wird von SQL Server abhaengig
+	# vom Session-DATEFORMAT (@@LANGUAGE des Logins) interpretiert - bei einer dmy-Sprache (z.B.
+	# Deutsch) wird '2025-02-01' als Tag=02/Monat=01 statt Monat=02/Tag=01 gelesen, alle
+	# Monatsgrenzen kollabieren dann auf 12 Tage im Januar (live gegen einen Deutsch-Login
+	# bestaetigt). Das unseparierte Format ist DATEFORMAT-unabhaengig immer sicher.
 	$boundarySql = ($BoundaryList | ForEach-Object {
 			$v = $_.BoundaryValue
-			if ($v -is [datetime]) { "'$($v.ToString('yyyy-MM-dd'))'" }
+			if ($v -is [datetime]) { "'$($v.ToString('yyyyMMdd'))'" }
 			elseif ($v -is [string]) { "N'$($v.Replace("'", "''"))'" }
 			else { "$v" }
 		}) -join ', '

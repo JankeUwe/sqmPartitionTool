@@ -149,7 +149,10 @@ function Invoke-sqmTableRelocation
 	{
 		if ($null -eq $value -or $value -is [System.DBNull]) { return 'NULL' }
 		$dateTypes = @('date', 'datetime', 'datetime2', 'smalldatetime', 'datetimeoffset')
-		if ($typeName -in $dateTypes) { return "'$(([datetime]$value).ToString('yyyy-MM-dd HH:mm:ss.fffffff'))'" }
+		# 'yyyyMMdd' (Datumsteil ohne Trennzeichen) statt 'yyyy-MM-dd' - DATEFORMAT-unabhaengig,
+		# siehe Kommentar in New-sqmPartitionSchemeSet.ps1 (sonst Resume-Punkt falsch bei einer
+		# DATETIME-KeyColumn und dmy-Login).
+		if ($typeName -in $dateTypes) { return "'$(([datetime]$value).ToString('yyyyMMdd HH:mm:ss.fffffff'))'" }
 		if ($typeName -in @('char', 'varchar', 'nchar', 'nvarchar', 'uniqueidentifier')) { return "'$("$value".Replace("'", "''"))'" }
 		return "$value"
 	}

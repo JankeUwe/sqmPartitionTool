@@ -614,8 +614,11 @@ SELECT @RowsThisCall AS RowsThisCall, @MonthComplete AS MonthComplete;
 				# -SurrogateDateFormat, Text: quotierter String im -SurrogateDateFormat, Date:
 				# quotiertes ISO-Datum) - dieselbe Konvention wie
 				# Get-sqmPartitionBoundaryList/Invoke-sqmTablePartitionConversion.
-				$periodStartLit = switch ($BoundaryType) { 'Int' { [int64]$periodStartDate.ToString($SurrogateDateFormat) }; 'Text' { "'$($periodStartDate.ToString($SurrogateDateFormat))'" }; default { "'$($periodStartDate.ToString('yyyy-MM-dd'))'" } }
-				$periodEndLit = switch ($BoundaryType) { 'Int' { [int64]$periodEndDate.ToString($SurrogateDateFormat) }; 'Text' { "'$($periodEndDate.ToString($SurrogateDateFormat))'" }; default { "'$($periodEndDate.ToString('yyyy-MM-dd'))'" } }
+				# 'yyyyMMdd' statt 'yyyy-MM-dd' - DATEFORMAT-unabhaengig, siehe Kommentar in
+				# New-sqmPartitionSchemeSet.ps1 (sonst Row-Count-Gegenpruefung faelschlich 0 bei
+				# dmy-Login, live gegen einen Deutsch-Login bestaetigt).
+				$periodStartLit = switch ($BoundaryType) { 'Int' { [int64]$periodStartDate.ToString($SurrogateDateFormat) }; 'Text' { "'$($periodStartDate.ToString($SurrogateDateFormat))'" }; default { "'$($periodStartDate.ToString('yyyyMMdd'))'" } }
+				$periodEndLit = switch ($BoundaryType) { 'Int' { [int64]$periodEndDate.ToString($SurrogateDateFormat) }; 'Text' { "'$($periodEndDate.ToString($SurrogateDateFormat))'" }; default { "'$($periodEndDate.ToString('yyyyMMdd'))'" } }
 
 				$loggedRows = [int64](Invoke-DbaQuery @connParams -Database $Database -Query "SELECT RowsArchived FROM dbo.sqm_ArchiveMonthLog WHERE SchemaName = N'$Schema' AND TableName = N'$Table' AND ArchiveDatabaseName = N'$ArchiveDatabaseName' AND YYYYMM = $period;" -ErrorAction Stop -EnableException -As PSObject)[0].RowsArchived
 				$sourceRowsNow = [int64](Invoke-DbaQuery @connParams -Database $Database -Query "SELECT COUNT(*) AS Cnt FROM [$Schema].[$Table] WHERE [$DateColumn] >= $periodStartLit AND [$DateColumn] < $periodEndLit;" -ErrorAction Stop -EnableException -As PSObject)[0].Cnt

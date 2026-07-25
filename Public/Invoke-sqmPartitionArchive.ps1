@@ -305,7 +305,9 @@ function Invoke-sqmPartitionArchive
 		# [string]-Boundary-Wert (BoundaryType 'Text', SQL_VARIANT liefert dann einen .NET-String)
 		# muss als N'...'-Literal gequotet werden, statt sich auf implizite int->varchar-Konvertierung
 		# zu verlassen (analog zur BoundaryValue-Formatierung in New-sqmPartitionSchemeSet.ps1).
-		$upperBoundaryLiteral = if ($targetPartition.UpperBoundaryValue -is [datetime]) { "'$($targetPartition.UpperBoundaryValue.ToString('yyyy-MM-dd'))'" }
+		# 'yyyyMMdd' statt 'yyyy-MM-dd' - DATEFORMAT-unabhaengig, siehe Kommentar in
+		# New-sqmPartitionSchemeSet.ps1 (sonst MERGE RANGE auf die falsche Grenze bei dmy-Login).
+		$upperBoundaryLiteral = if ($targetPartition.UpperBoundaryValue -is [datetime]) { "'$($targetPartition.UpperBoundaryValue.ToString('yyyyMMdd'))'" }
 		elseif ($targetPartition.UpperBoundaryValue -is [string]) { "N'$($targetPartition.UpperBoundaryValue.Replace("'", "''"))'" }
 		else { "$($targetPartition.UpperBoundaryValue)" }
 		$mergeDdl = "ALTER PARTITION FUNCTION [$($status[0].PartitionFunctionName)]() MERGE RANGE ($upperBoundaryLiteral);"

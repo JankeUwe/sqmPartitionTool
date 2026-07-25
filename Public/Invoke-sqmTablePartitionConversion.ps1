@@ -440,7 +440,9 @@ WHERE p.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND p.index_id IN (0, 1);
 			{
 				switch ($boundaryType)
 				{
-					'Date'    { return "'$(([datetime]$value).ToString('yyyy-MM-dd'))'" }
+					# 'yyyyMMdd' statt 'yyyy-MM-dd' - DATEFORMAT-unabhaengig, siehe Kommentar in
+					# New-sqmPartitionSchemeSet.ps1 (sonst Segmentgrenzen falsch bei dmy-Login).
+					'Date'    { return "'$(([datetime]$value).ToString('yyyyMMdd'))'" }
 					'Text'    { return "'$value'" }
 					default   { return "$value" }
 				}
