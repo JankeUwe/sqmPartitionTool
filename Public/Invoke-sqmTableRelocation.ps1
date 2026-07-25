@@ -168,7 +168,7 @@ LEFT JOIN sys.identity_columns ic ON ic.object_id = c.object_id AND ic.column_id
 WHERE c.object_id = OBJECT_ID(N'[$Schema].[$Table]')
 ORDER BY c.column_id
 "@
-			$colDefs = Invoke-DbaQuery @connParams -Database $Database -Query $colDefQuery -ErrorAction Stop -EnableException
+			$colDefs = Invoke-DbaQuery @connParams -Database $Database -Query $colDefQuery -ErrorAction Stop -EnableException -As PSObject
 			if (-not $colDefs) { throw "Tabelle '$Schema.$Table' nicht gefunden in '$Database'." }
 			$hasIdentityCol = [bool]($colDefs | Where-Object { [bool]$_.is_identity })
 			$colList = ($colDefs | ForEach-Object { "[$($_.ColumnName)]" }) -join ', '
@@ -188,7 +188,7 @@ ORDER BY ic.key_ordinal
 				# eines Arrays) versehentlich DataRows EIGENEN Spalten-Indexer aufrufen ($ciKey[0]
 				# waere dann der WERT der ersten Spalte, also "Id" als String statt des DataRow-
 				# Objekts) - .ColumnName darauf liefert dann lautlos $null statt eines Fehlers.
-				$ciKeyRows = @(Invoke-DbaQuery @connParams -Database $Database -Query $ciKeyQuery -ErrorAction Stop -EnableException)
+				$ciKeyRows = @(Invoke-DbaQuery @connParams -Database $Database -Query $ciKeyQuery -ErrorAction Stop -EnableException -As PSObject)
 				if ($ciKeyRows.Count -eq 1) { $KeyColumn = $ciKeyRows[0].ColumnName }
 				else { throw "'-KeyColumn' ist Pflicht: '$Schema.$Table' hat keinen einspaltigen Clustered Index/PK (Heap oder zusammengesetzter Schluessel)." }
 			}
@@ -199,22 +199,22 @@ ORDER BY ic.key_ordinal
 			if (-not $PSCmdlet.ShouldProcess($Database, $action)) { return }
 
 			# --- Zieltabelle anlegen (falls nicht vorhanden) + Clustered Index/PK nachbilden -----
-			$targetExists = Invoke-DbaQuery @connParams -Database $Database -Query "SELECT 1 FROM [$TargetDatabaseName].sys.tables t JOIN [$TargetDatabaseName].sys.schemas s ON s.schema_id = t.schema_id WHERE s.name = N'$TargetSchemaName' AND t.name = N'$Table'" -ErrorAction Stop -EnableException
+			$targetExists = Invoke-DbaQuery @connParams -Database $Database -Query "SELECT 1 FROM [$TargetDatabaseName].sys.tables t JOIN [$TargetDatabaseName].sys.schemas s ON s.schema_id = t.schema_id WHERE s.name = N'$TargetSchemaName' AND t.name = N'$Table'" -ErrorAction Stop -EnableException -As PSObject
 			if (-not $targetExists)
 			{
-				Invoke-DbaQuery @connParams -Database $Database -Query "IF SCHEMA_ID(N'$TargetSchemaName') IS NULL EXEC(N'CREATE SCHEMA [$TargetSchemaName]');" -ErrorAction Stop -EnableException
-				Invoke-DbaQuery @connParams -Database $Database -Query "SELECT * INTO [$TargetDatabaseName].[$TargetSchemaName].[$Table] FROM [$Schema].[$Table] WHERE 1 = 0;" -ErrorAction Stop -EnableException
-				Invoke-DbaQuery @connParams -Database $Database -Query "CREATE $(if ($ciKeyRows) { 'CLUSTERED' } else { '' }) INDEX [IX_${Table}_${KeyColumn}] ON [$TargetDatabaseName].[$TargetSchemaName].[$Table] ([$KeyColumn]);" -ErrorAction Stop -EnableException
+				Invoke-DbaQuery @connParams -Database $Database -Query "IF SCHEMA_ID(N'$TargetSchemaName') IS NULL EXEC(N'CREATE SCHEMA [$TargetSchemaName]');" -ErrorAction Stop -EnableException -As PSObject | Out-Null
+				Invoke-DbaQuery @connParams -Database $Database -Query "SELECT * INTO [$TargetDatabaseName].[$TargetSchemaName].[$Table] FROM [$Schema].[$Table] WHERE 1 = 0;" -ErrorAction Stop -EnableException -As PSObject | Out-Null
+				Invoke-DbaQuery @connParams -Database $Database -Query "CREATE $(if ($ciKeyRows) { 'CLUSTERED' } else { '' }) INDEX [IX_${Table}_${KeyColumn}] ON [$TargetDatabaseName].[$TargetSchemaName].[$Table] ([$KeyColumn]);" -ErrorAction Stop -EnableException -As PSObject | Out-Null
 				Invoke-sqmLogging -Message "Zieltabelle '$TargetDatabaseName.$TargetSchemaName.$Table' angelegt." -FunctionName $functionName -Level "INFO"
 			}
 
 			# --- Fortsetzpunkt ermitteln (Resume: MAX der Schluesselspalte im Ziel) --------------
-			$resumeRow = Invoke-DbaQuery @connParams -Database $Database -Query "SELECT MAX([$KeyColumn]) AS LastKey FROM [$TargetDatabaseName].[$TargetSchemaName].[$Table]" -ErrorAction Stop -EnableException
+			$resumeRow = Invoke-DbaQuery @connParams -Database $Database -Query "SELECT MAX([$KeyColumn]) AS LastKey FROM [$TargetDatabaseName].[$TargetSchemaName].[$Table]" -ErrorAction Stop -EnableException -As PSObject
 			# MAX() ueber eine leere Tabelle liefert aus SQL Server NULL, das per Invoke-DbaQuery als
 			# [System.DBNull]::Value zurueckkommt - NICHT PowerShells $null. Ein Vergleich mit $null
 			# waere hier stillschweigend falsch (DBNull.Value -eq $null ist False) und wuerde weiter
 			# unten zu einer leeren, syntaktisch ungueltigen WHERE-Klausel fuehren.
-			$lastKeyValue = if ($resumeRow.LastKey -is [System.DBNull]) { $null } else { $resumeRow.LastKey }
+			$lastKeyValue = if (-not $resumeRow -or -not $resumeRow[0]) { $null } elseif ($resumeRow[0].LastKey -is [System.DBNull]) { $null } else { $resumeRow[0].LastKey }
 			if ($null -ne $lastKeyValue) { Invoke-sqmLogging -Message "Fortsetzung ab '$KeyColumn' > $lastKeyValue (bereits kopierte Zeilen bleiben unberuehrt)." -FunctionName $functionName -Level "INFO" }
 
 			# --- Batchweise, nicht-destruktive Kopie ----------------------------------------------
@@ -244,11 +244,12 @@ SELECT MAX([Key_]) AS LastKey, COUNT(*) AS Cnt FROM @KeyTable;
 				}
 				else { $batchSql }
 
-				$batchResult = Invoke-DbaQuery @connParams -Database $Database -Query $batchSql -ErrorAction Stop -EnableException
-				$rowsThisBatch = [int64]$batchResult.Cnt
+				$batchResult = Invoke-DbaQuery @connParams -Database $Database -Query $batchSql -ErrorAction Stop -EnableException -As PSObject
+				if (-not $batchResult -or -not $batchResult[0]) { throw "Batch-Abfrage gab kein Ergebnis zurueck." }
+				$rowsThisBatch = [int64]($batchResult[0].Cnt ?? 0)
 				if ($rowsThisBatch -eq 0) { break }
 
-				$lastKeyValue = $batchResult.LastKey
+				$lastKeyValue = $batchResult[0].LastKey
 				$totalCopied += $rowsThisBatch
 				Invoke-sqmLogging -Message "$totalCopied Zeile(n) kopiert (Batch: $rowsThisBatch, letzter Schluessel: $lastKeyValue)." -FunctionName $functionName -Level "INFO"
 			}
@@ -270,8 +271,8 @@ SELECT MAX([Key_]) AS LastKey, COUNT(*) AS Cnt FROM @KeyTable;
 		}
 
 		# --- Cutover: Zeilenzahl-Abgleich, dann Umbenennen + View --------------------------------
-		$srcCount = [int64](Invoke-DbaQuery @connParams -Database $Database -Query "SELECT COUNT(*) AS Cnt FROM [$Schema].[$Table]" -ErrorAction Stop -EnableException).Cnt
-		$tgtCount = [int64](Invoke-DbaQuery @connParams -Database $Database -Query "SELECT COUNT(*) AS Cnt FROM [$TargetDatabaseName].[$TargetSchemaName].[$Table]" -ErrorAction Stop -EnableException).Cnt
+		$srcCount = [int64](Invoke-DbaQuery @connParams -Database $Database -Query "SELECT COUNT(*) AS Cnt FROM [$Schema].[$Table]" -ErrorAction Stop -EnableException -As PSObject)[0].Cnt
+		$tgtCount = [int64](Invoke-DbaQuery @connParams -Database $Database -Query "SELECT COUNT(*) AS Cnt FROM [$TargetDatabaseName].[$TargetSchemaName].[$Table]" -ErrorAction Stop -EnableException -As PSObject)[0].Cnt
 		if ($srcCount -ne $tgtCount)
 		{
 			throw "Cutover abgebrochen: Zeilenzahlen stimmen nicht ueberein (Quelle $srcCount, Ziel $tgtCount). Kopie ist noch nicht vollstaendig - erneut ohne -CutoverOnly aufrufen."
@@ -281,19 +282,19 @@ SELECT MAX([Key_]) AS LastKey, COUNT(*) AS Cnt FROM @KeyTable;
 		if (-not $PSCmdlet.ShouldProcess($Database, $cutoverAction)) { return }
 
 		$renamedName = "${Table}${RenamedTableSuffix}"
-		Invoke-DbaQuery @connParams -Database $Database -Query "EXEC sp_rename N'[$Schema].[$Table]', N'$renamedName';" -ErrorAction Stop -EnableException
+		Invoke-DbaQuery @connParams -Database $Database -Query "EXEC sp_rename N'[$Schema].[$Table]', N'$renamedName';" -ErrorAction Stop -EnableException -As PSObject | Out-Null
 		Invoke-sqmLogging -Message "Original-Tabelle umbenannt: '$Schema.$Table' -> '$Schema.$renamedName' (bleibt vollstaendig erhalten)." -FunctionName $functionName -Level "INFO"
 
 		if (-not $colDefs)
 		{
 			# CutoverOnly-Pfad: Spaltenliste wurde oben nicht ermittelt, jetzt nachholen (von der
 			# gerade umbenannten Original-Tabelle, deren Struktur identisch zur Zieltabelle ist).
-			$colDefs = Invoke-DbaQuery @connParams -Database $Database -Query "SELECT name AS ColumnName FROM sys.columns WHERE object_id = OBJECT_ID(N'[$Schema].[$renamedName]') ORDER BY column_id" -ErrorAction Stop -EnableException
+			$colDefs = Invoke-DbaQuery @connParams -Database $Database -Query "SELECT name AS ColumnName FROM sys.columns WHERE object_id = OBJECT_ID(N'[$Schema].[$renamedName]') ORDER BY column_id" -ErrorAction Stop -EnableException -As PSObject
 			$colList = ($colDefs | ForEach-Object { "[$($_.ColumnName)]" }) -join ', '
 		}
 
 		$viewDdl = "CREATE VIEW [$Schema].[$Table] AS SELECT $colList FROM [$TargetDatabaseName].[$TargetSchemaName].[$Table];"
-		Invoke-DbaQuery @connParams -Database $Database -Query $viewDdl -ErrorAction Stop -EnableException
+		Invoke-DbaQuery @connParams -Database $Database -Query $viewDdl -ErrorAction Stop -EnableException -As PSObject | Out-Null
 		Invoke-sqmLogging -Message "Kompatibilitaets-View '$Schema.$Table' -> '$TargetDatabaseName.$TargetSchemaName.$Table' angelegt." -FunctionName $functionName -Level "INFO"
 
 		return [PSCustomObject]@{

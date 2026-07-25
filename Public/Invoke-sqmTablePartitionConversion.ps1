@@ -227,7 +227,7 @@ function Invoke-sqmTablePartitionConversion
 		if ($Method -eq 'BatchedSwap')
 		{
 			$fkCheckQuery = "SELECT fk.name AS ForeignKeyName, OBJECT_SCHEMA_NAME(fk.parent_object_id) + '.' + OBJECT_NAME(fk.parent_object_id) AS ReferencingTable FROM sys.foreign_keys fk WHERE fk.referenced_object_id = OBJECT_ID(N'[$Schema].[$Table]');"
-			$incomingFks = @(Invoke-DbaQuery @connParams -Query $fkCheckQuery -ErrorAction Stop)
+			$incomingFks = @(Invoke-DbaQuery @connParams -Query $fkCheckQuery -ErrorAction Stop -As PSObject)
 			if ($incomingFks.Count -gt 0)
 			{
 				$fkList = ($incomingFks | ForEach-Object { "$($_.ReferencingTable) ($($_.ForeignKeyName))" }) -join '; '
@@ -237,7 +237,7 @@ function Invoke-sqmTablePartitionConversion
 			}
 
 			$triggerCheckQuery = "SELECT name FROM sys.triggers WHERE parent_id = OBJECT_ID(N'[$Schema].[$Table]') AND parent_class = 1;"
-			$triggers = @(Invoke-DbaQuery @connParams -Query $triggerCheckQuery -ErrorAction Stop)
+			$triggers = @(Invoke-DbaQuery @connParams -Query $triggerCheckQuery -ErrorAction Stop -As PSObject)
 			if ($triggers.Count -gt 0)
 			{
 				$triggerList = ($triggers | ForEach-Object { $_.name }) -join ', '
@@ -258,7 +258,7 @@ JOIN sys.tables t ON t.object_id = c.object_id
 JOIN sys.schemas s ON s.schema_id = t.schema_id
 WHERE s.name = N'$Schema' AND t.name = N'$Table' AND c.name = N'$PartitionColumn'
 "@
-		$colType = Invoke-DbaQuery @connParams -Query $typeQuery -ErrorAction Stop
+		$colType = Invoke-DbaQuery @connParams -Query $typeQuery -ErrorAction Stop -As PSObject
 		if (-not $colType) { throw "Spalte '$PartitionColumn' nicht gefunden." }
 
 		$typeName = [string]$colType.TypeName
@@ -349,7 +349,7 @@ WHERE s.name = N'$Schema' AND t.name = N'$Table' AND c.name = N'$PartitionColumn
 		{
 			try
 			{
-				$edResult = Invoke-DbaQuery @connParams -Query "SELECT CAST(SERVERPROPERTY('EngineEdition') AS INT) AS EngineEdition" -ErrorAction Stop
+				$edResult = Invoke-DbaQuery @connParams -Query "SELECT CAST(SERVERPROPERTY('EngineEdition') AS INT) AS EngineEdition" -ErrorAction Stop -As PSObject
 				$onlineEdition = ([int]$edResult.EngineEdition -eq 3)
 				if (-not $onlineEdition)
 				{
@@ -371,7 +371,7 @@ JOIN sys.schemas s ON s.schema_id = t.schema_id
 WHERE s.name = N'$Schema' AND t.name = N'$Table' AND i.index_id = 1
 GROUP BY i.name, i.is_unique, i.is_primary_key, i.is_unique_constraint
 "@
-		$ci = Invoke-DbaQuery @connParams -Query $clusteredIndexQuery -ErrorAction Stop
+		$ci = Invoke-DbaQuery @connParams -Query $clusteredIndexQuery -ErrorAction Stop -As PSObject
 
 		$applyAction = "'$Schema.$Table' auf Partition Scheme '$($scheme.PartitionSchemeName)' umstellen"
 		if (-not $PSCmdlet.ShouldProcess($Database, $applyAction))
@@ -388,7 +388,7 @@ GROUP BY i.name, i.is_unique, i.is_primary_key, i.is_unique_constraint
 			Invoke-sqmLogging -Message "-Method BatchedSwap fuer '$Schema.$Table' - segmentweises Kopieren+Loeschen (atomar je Batch, keine eingehenden Fremdschluessel/Trigger vorhanden)." -FunctionName $functionName -Level "INFO"
 
 			$swapTable = "${Table}_sqmPartNew"
-			Invoke-DbaQuery @connParams -Query "IF OBJECT_ID(N'[$Schema].[$swapTable]') IS NOT NULL DROP TABLE [$Schema].[$swapTable];" -ErrorAction Stop -EnableException
+			Invoke-DbaQuery @connParams -Query "IF OBJECT_ID(N'[$Schema].[$swapTable]') IS NOT NULL DROP TABLE [$Schema].[$swapTable];" -ErrorAction Stop -EnableException -As PSObject | Out-Null
 
 			$defParams = @{
 				SqlInstance         = $SqlInstance
@@ -411,9 +411,17 @@ GROUP BY i.name, i.is_unique, i.is_primary_key, i.is_unique_constraint
 
 			if ($DataCompression -ne 'None')
 			{
-				$compressionSql = "ALTER TABLE [$Schema].[$swapTable] REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = $($DataCompression.ToUpper()));"
-				Invoke-DbaQuery @connParams -Query $compressionSql -ErrorAction Stop -EnableException
-				Invoke-sqmLogging -Message "$DataCompression-Kompression auf '$swapTable' angewendet (alle Partitionen)." -FunctionName $functionName -Level "INFO"
+				Invoke-sqmLogging -Message "$DataCompression-Kompression wird auf '$swapTable' angewendet - alle Partitionen werden gebuendelt (kann bei grossen Tabellen mehrere Stunden dauern)." -FunctionName $functionName -Level "WARNING"
+				try
+				{
+					$compressionSql = "ALTER TABLE [$Schema].[$swapTable] REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = $($DataCompression.ToUpper()));"
+					Invoke-DbaQuery @connParams -Query $compressionSql -ErrorAction Stop -EnableException -As PSObject | Out-Null
+					Invoke-sqmLogging -Message "$DataCompression-Kompression auf '$swapTable' abgeschlossen (alle Partitionen)." -FunctionName $functionName -Level "INFO"
+				}
+				catch
+				{
+					Invoke-sqmLogging -Message "Fehler bei Kompressionsanwendung (Umbau wird fortgesetzt): $($_.Exception.Message). Kompression kann spaeter manuell mit ALTER TABLE ... REBUILD PARTITION angewendet werden." -FunctionName $functionName -Level "WARNING"
+				}
 			}
 
 			# Aktuelle Filegroup der ALTEN Tabelle ermitteln - Ziel fuer periodisches Shrinken waehrend
@@ -473,7 +481,7 @@ WHERE p.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND p.index_id IN (0, 1);
 					}
 					else { $moveBody }
 
-					$rowsAffected = [int64](Invoke-DbaQuery @connParams -Query $moveSql -ErrorAction Stop -EnableException).Cnt
+					$rowsAffected = [int64](Invoke-DbaQuery @connParams -Query $moveSql -ErrorAction Stop -EnableException -As PSObject)[0].Cnt
 					$segMoved += $rowsAffected
 				}
 
@@ -516,15 +524,16 @@ WHERE p.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND p.index_id IN (0, 1);
 		{
 			if ($ci)
 			{
+				if (-not $ci.KeyColumns) { throw "Clustered Index hat keine Schluesselspalten (unerwartet)." }
 				$existingKeyCols = @($ci.KeyColumns -split ',')
 				$keyColsWithPartition = if ($PartitionColumn -in $existingKeyCols) { $existingKeyCols } else { $existingKeyCols + $PartitionColumn }
 				$keyColList = ($keyColsWithPartition | ForEach-Object { "[$_]" }) -join ', '
 
-				if (($ci.is_primary_key -or $ci.is_unique_constraint) -and $PartitionColumn -notin $existingKeyCols)
+				if ((($ci.is_primary_key ?? $false) -or ($ci.is_unique_constraint ?? $false)) -and $PartitionColumn -notin $existingKeyCols)
 				{
 					# PK/UNIQUE-Constraint muss neu definiert werden (DROP_EXISTING allein reicht hier nicht,
 					# die Constraint-Spaltenliste muss die Partitionsspalte mit enthalten).
-					$constraintType = if ($ci.is_primary_key) { 'PRIMARY KEY' } else { 'UNIQUE' }
+					$constraintType = if ($ci.is_primary_key ?? $false) { 'PRIMARY KEY' } else { 'UNIQUE' }
 					$ddl = @"
 ALTER TABLE [$Schema].[$Table] DROP CONSTRAINT [$($ci.IndexName)];
 ALTER TABLE [$Schema].[$Table] ADD CONSTRAINT [$($ci.IndexName)] $constraintType CLUSTERED ($keyColList)
@@ -533,7 +542,7 @@ ALTER TABLE [$Schema].[$Table] ADD CONSTRAINT [$($ci.IndexName)] $constraintType
 				}
 				else
 				{
-					$uniqueKw = if ($ci.is_unique) { 'UNIQUE ' } else { '' }
+					$uniqueKw = if ($ci.is_unique ?? $false) { 'UNIQUE ' } else { '' }
 					$ddl = @"
 CREATE ${uniqueKw}CLUSTERED INDEX [$($ci.IndexName)]
     ON [$Schema].[$Table] ($keyColList)

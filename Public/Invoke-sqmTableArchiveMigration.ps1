@@ -279,7 +279,7 @@ function Invoke-sqmTableArchiveMigration
 		if (-not $CutoverToArchiveView) { return $false }
 
 		$renamedName = "${Table}${RenamedTableSuffix}"
-		$alreadyDone = Invoke-DbaQuery @connParams -Database $Database -Query "SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[$Schema].[$renamedName]');" -ErrorAction Stop -EnableException
+		$alreadyDone = Invoke-DbaQuery @connParams -Database $Database -Query "SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[$Schema].[$renamedName]');" -ErrorAction Stop -EnableException -As PSObject
 		if ($alreadyDone)
 		{
 			Invoke-sqmLogging -Message "Cutover uebersprungen: '$Schema.$renamedName' existiert bereits - vermutlich schon frueher ausgefuehrt." -FunctionName $functionName -Level "INFO"
@@ -289,7 +289,7 @@ function Invoke-sqmTableArchiveMigration
 		$cutoverAction = "'$Schema.$Table' umbenennen -> '$Schema.$renamedName', dann View '$Schema.$Table' -> '$ArchiveDatabaseName.$ArchiveSchemaName.$Table' anlegen"
 		if (-not $PSCmdlet.ShouldProcess($Database, $cutoverAction)) { return $false }
 
-		$residualRows = [int64](Invoke-DbaQuery @connParams -Database $Database -Query "SELECT COUNT(*) AS Cnt FROM [$Schema].[$Table];" -ErrorAction Stop -EnableException).Cnt
+		$residualRows = [int64](Invoke-DbaQuery @connParams -Database $Database -Query "SELECT COUNT(*) AS Cnt FROM [$Schema].[$Table];" -ErrorAction Stop -EnableException -As PSObject)[0].Cnt
 
 		Invoke-DbaQuery @connParams -Database $Database -Query "EXEC sp_rename N'[$Schema].[$Table]', N'$renamedName';" -ErrorAction Stop -EnableException
 		Invoke-sqmLogging -Message "Original-Tabelle umbenannt: '$Schema.$Table' -> '$Schema.$renamedName' (bleibt vollstaendig erhalten, wird NICHT geloescht)." -FunctionName $functionName -Level "INFO"
@@ -313,7 +313,7 @@ function Invoke-sqmTableArchiveMigration
 		# =========================================================================================
 		# 0. Archiv-Datenbank muss existieren (Admin legt sie an, nicht diese Funktion)
 		# =========================================================================================
-		$dbExists = Invoke-DbaQuery @connParams -Database $Database -Query "SELECT 1 FROM sys.databases WHERE name = N'$ArchiveDatabaseName';" -ErrorAction Stop -EnableException
+		$dbExists = Invoke-DbaQuery @connParams -Database $Database -Query "SELECT 1 FROM sys.databases WHERE name = N'$ArchiveDatabaseName';" -ErrorAction Stop -EnableException -As PSObject
 		if (-not $dbExists)
 		{
 			throw "Archiv-Datenbank '$ArchiveDatabaseName' existiert nicht auf '$SqlInstance' - muss vom Admin vorher angelegt werden."
@@ -326,7 +326,7 @@ function Invoke-sqmTableArchiveMigration
 		if ($CutoverToArchiveView)
 		{
 			$renamedNameCheck = "${Table}${RenamedTableSuffix}"
-			$cutoverAlreadyDone = Invoke-DbaQuery @connParams -Database $Database -Query "SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[$Schema].[$renamedNameCheck]');" -ErrorAction Stop -EnableException
+			$cutoverAlreadyDone = Invoke-DbaQuery @connParams -Database $Database -Query "SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[$Schema].[$renamedNameCheck]');" -ErrorAction Stop -EnableException -As PSObject
 			if ($cutoverAlreadyDone)
 			{
 				Invoke-sqmLogging -Message "Cutover bereits abgeschlossen: '$Schema.$renamedNameCheck' existiert bereits, '$Schema.$Table' ist die Kompatibilitaets-View - nichts zu tun." -FunctionName $functionName -Level "INFO"
@@ -354,7 +354,7 @@ WHERE i.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND i.index_id = 1
 ORDER BY ic.key_ordinal
 "@
 			# @(...) erzwingt Array-Kontext - siehe gleicher Kommentar in Invoke-sqmTableRelocation.
-			$ciKeyRows = @(Invoke-DbaQuery @connParams -Database $Database -Query $ciKeyQuery -ErrorAction Stop -EnableException)
+			$ciKeyRows = @(Invoke-DbaQuery @connParams -Database $Database -Query $ciKeyQuery -ErrorAction Stop -EnableException -As PSObject)
 			if ($ciKeyRows.Count -eq 0) { throw "'-KeyColumn' ist Pflicht: '$Schema.$Table' ist ein Heap (kein Clustered Index/PK, aus dem ein Schluessel automatisch abgeleitet werden koennte)." }
 			if ($ciKeyRows.Count -gt 4) { throw "'$Schema.$Table' hat einen zusammengesetzten Schluessel mit $($ciKeyRows.Count) Spalten - aktuell werden maximal 4 Schluesselspalten unterstuetzt. '-KeyColumn' muss eine eigene, hoechstens 4-spaltige eindeutige Schluesselliste explizit angeben." }
 			$KeyColumn = @($ciKeyRows | ForEach-Object { $_.ColumnName })
@@ -380,7 +380,7 @@ JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.inde
 JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
 WHERE i.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND c.name = N'$DateColumn'
 "@
-		$dateColIndexed = Invoke-DbaQuery @connParams -Database $Database -Query $dateIdxQuery -ErrorAction Stop -EnableException
+		$dateColIndexed = Invoke-DbaQuery @connParams -Database $Database -Query $dateIdxQuery -ErrorAction Stop -EnableException -As PSObject
 		if (-not $dateColIndexed)
 		{
 			Invoke-sqmLogging -Message "'$Schema.$Table' hat keinen Index mit '$DateColumn' als fuehrender Spalte - jeder Batch-Aufruf von sqm_ArchiveMonthBatch scanned dadurch potenziell die gesamte Tabelle/Partition. Bei grossen Tabellen wird DRINGEND empfohlen, VOR einem echten Migrationslauf einen nichtclustered Index auf ($DateColumn, $keyColumnsCsv) anzulegen (Admin-Entscheidung, wird von diesem Tool NICHT automatisch erstellt)." -FunctionName $functionName -Level "WARNING"
@@ -397,7 +397,7 @@ WHERE i.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND c.name = N'$DateColumn'
 		#     VTDAT sonst mit "date ist inkompatibel mit int" fehl (live gegen CARCHIVE bestaetigt).
 		# ---------------------------------------------------------------------------------------
 		$dateColTypeQuery = "SELECT ty.name AS TypeName FROM sys.columns c JOIN sys.types ty ON ty.user_type_id = c.user_type_id WHERE c.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND c.name = N'$DateColumn';"
-		$dateColTypeRow = Invoke-DbaQuery @connParams -Database $Database -Query $dateColTypeQuery -ErrorAction Stop -EnableException
+		$dateColTypeRow = Invoke-DbaQuery @connParams -Database $Database -Query $dateColTypeQuery -ErrorAction Stop -EnableException -As PSObject
 		if (-not $dateColTypeRow) { throw "Spalte '$DateColumn' nicht gefunden in '$Schema.$Table'." }
 		$dateColTypeName = [string]$dateColTypeRow.TypeName
 
@@ -417,15 +417,15 @@ WHERE i.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND c.name = N'$DateColumn'
 		# mehr liefert (IsEmpty) - genau der Fall, in dem ein Folgeaufruf trotzdem noch sinnvoll ist
 		# (z.B. nur um -CutoverToArchiveView nachzuholen). Ohne bereits bekannte, abgeschlossene
 		# Monate aus dem Log ist eine leere Quelle dagegen wirklich nichts zu migrieren.
-		$archiveExists = Invoke-DbaQuery @connParams -Database $Database -Query "SELECT 1 FROM [$ArchiveDatabaseName].sys.tables t JOIN [$ArchiveDatabaseName].sys.schemas s ON s.schema_id = t.schema_id WHERE s.name = N'$ArchiveSchemaName' AND t.name = N'$Table'" -ErrorAction Stop -EnableException
+		$archiveExists = Invoke-DbaQuery @connParams -Database $Database -Query "SELECT 1 FROM [$ArchiveDatabaseName].sys.tables t JOIN [$ArchiveDatabaseName].sys.schemas s ON s.schema_id = t.schema_id WHERE s.name = N'$ArchiveSchemaName' AND t.name = N'$Table'" -ErrorAction Stop -EnableException -As PSObject
 
 		# Log-Tabelle existiert evtl. noch nicht (allererster Aufruf ueberhaupt) - dann sind
 		# logischerweise auch noch keine Monate abgeschlossen.
-		$logTableExists = Invoke-DbaQuery @connParams -Database $Database -Query "SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'dbo.sqm_ArchiveMonthLog') AND type = 'U';" -ErrorAction Stop -EnableException
+		$logTableExists = Invoke-DbaQuery @connParams -Database $Database -Query "SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'dbo.sqm_ArchiveMonthLog') AND type = 'U';" -ErrorAction Stop -EnableException -As PSObject
 		$completedPeriods = if ($logTableExists)
 		{
 			$completedQuery = "SELECT YYYYMM FROM dbo.sqm_ArchiveMonthLog WHERE SchemaName = N'$Schema' AND TableName = N'$Table' AND ArchiveDatabaseName = N'$ArchiveDatabaseName' AND Status = 'Completed';"
-			@(Invoke-DbaQuery @connParams -Database $Database -Query $completedQuery -ErrorAction Stop -EnableException | ForEach-Object { [int]$_.YYYYMM })
+			@(Invoke-DbaQuery @connParams -Database $Database -Query $completedQuery -ErrorAction Stop -EnableException -As PSObject | ForEach-Object { [int]$_.YYYYMM })
 		}
 		else { @() }
 
@@ -488,8 +488,8 @@ WHERE i.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND c.name = N'$DateColumn'
 		# =========================================================================================
 		if (-not $archiveExists)
 		{
-			Invoke-DbaQuery @connParams -Database $Database -Query "IF SCHEMA_ID(N'$ArchiveSchemaName') IS NULL EXEC(N'CREATE SCHEMA [$ArchiveSchemaName]');" -ErrorAction Stop -EnableException
-			Invoke-DbaQuery @connParams -Database $Database -Query "SELECT * INTO [$ArchiveDatabaseName].[$ArchiveSchemaName].[$Table] FROM [$Schema].[$Table] WHERE 1 = 0;" -ErrorAction Stop -EnableException
+			Invoke-DbaQuery @connParams -Database $Database -Query "IF SCHEMA_ID(N'$ArchiveSchemaName') IS NULL EXEC(N'CREATE SCHEMA [$ArchiveSchemaName]');" -ErrorAction Stop -EnableException -As PSObject | Out-Null
+			Invoke-DbaQuery @connParams -Database $Database -Query "SELECT * INTO [$ArchiveDatabaseName].[$ArchiveSchemaName].[$Table] FROM [$Schema].[$Table] WHERE 1 = 0;" -ErrorAction Stop -EnableException -As PSObject | Out-Null
 			Invoke-sqmLogging -Message "Leere Strukturkopie '$ArchiveDatabaseName.$ArchiveSchemaName.$Table' angelegt." -FunctionName $functionName -Level "INFO"
 
 			if ($ConfirmArchiveTable)
@@ -527,9 +527,17 @@ WHERE i.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND c.name = N'$DateColumn'
 
 			if ($DataCompression -ne 'None')
 			{
-				$compressionSql = "ALTER TABLE [$ArchiveSchemaName].[$Table] REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = $($DataCompression.ToUpper()));"
-				Invoke-DbaQuery @connParams -Database $ArchiveDatabaseName -Query $compressionSql -ErrorAction Stop -EnableException
-				Invoke-sqmLogging -Message "$DataCompression-Kompression auf '$ArchiveDatabaseName.$ArchiveSchemaName.$Table' angewendet (alle Partitionen)." -FunctionName $functionName -Level "INFO"
+				Invoke-sqmLogging -Message "$DataCompression-Kompression auf '$ArchiveDatabaseName.$ArchiveSchemaName.$Table' wird angewendet - alle Partitionen werden gebuendelt (kann bei grossen Tabellen mehrere Stunden dauern)." -FunctionName $functionName -Level "WARNING"
+				try
+				{
+					$compressionSql = "ALTER TABLE [$ArchiveSchemaName].[$Table] REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = $($DataCompression.ToUpper()));"
+					Invoke-DbaQuery @connParams -Database $ArchiveDatabaseName -Query $compressionSql -ErrorAction Stop -EnableException -As PSObject | Out-Null
+					Invoke-sqmLogging -Message "$DataCompression-Kompression auf '$ArchiveDatabaseName.$ArchiveSchemaName.$Table' abgeschlossen (alle Partitionen)." -FunctionName $functionName -Level "INFO"
+				}
+				catch
+				{
+					Invoke-sqmLogging -Message "Fehler bei Kompressionsanwendung (Migration wird fortgesetzt): $($_.Exception.Message). Kompression kann spaeter manuell mit ALTER TABLE ... REBUILD PARTITION angewendet werden." -FunctionName $functionName -Level "WARNING"
+				}
 			}
 		}
 		else
@@ -582,9 +590,10 @@ EXEC dbo.sqm_ArchiveMonthBatch
     @RowsThisCall = @RowsThisCall OUTPUT, @MonthComplete = @MonthComplete OUTPUT;
 SELECT @RowsThisCall AS RowsThisCall, @MonthComplete AS MonthComplete;
 "@
-				$batchResult = Invoke-DbaQuery @connParams -Database $Database -Query $batchSql -ErrorAction Stop -EnableException
-				$rowsThisCall = [int64]$batchResult.RowsThisCall
-				$monthComplete = [bool]$batchResult.MonthComplete
+				$batchResult = Invoke-DbaQuery @connParams -Database $Database -Query $batchSql -ErrorAction Stop -EnableException -As PSObject
+				if (-not $batchResult -or $null -eq $batchResult[0]) { throw "sqm_ArchiveMonthBatch returned no result set." }
+				$rowsThisCall = [int64]($batchResult[0].RowsThisCall ?? 0)
+				$monthComplete = [bool]($batchResult[0].MonthComplete ?? $false)
 				$totalRows += $rowsThisCall
 				$rowsThisPeriod += $rowsThisCall
 				Invoke-sqmLogging -Message "Monat $period : $rowsThisCall Zeile(n) in diesem Batch verarbeitet - $(if ($monthComplete) { 'Monat abgeschlossen' } else { 'weitere Batches folgen' })." -FunctionName $functionName -Level "INFO"
@@ -608,8 +617,8 @@ SELECT @RowsThisCall AS RowsThisCall, @MonthComplete AS MonthComplete;
 				$periodStartLit = switch ($BoundaryType) { 'Int' { [int64]$periodStartDate.ToString($SurrogateDateFormat) }; 'Text' { "'$($periodStartDate.ToString($SurrogateDateFormat))'" }; default { "'$($periodStartDate.ToString('yyyy-MM-dd'))'" } }
 				$periodEndLit = switch ($BoundaryType) { 'Int' { [int64]$periodEndDate.ToString($SurrogateDateFormat) }; 'Text' { "'$($periodEndDate.ToString($SurrogateDateFormat))'" }; default { "'$($periodEndDate.ToString('yyyy-MM-dd'))'" } }
 
-				$loggedRows = [int64](Invoke-DbaQuery @connParams -Database $Database -Query "SELECT RowsArchived FROM dbo.sqm_ArchiveMonthLog WHERE SchemaName = N'$Schema' AND TableName = N'$Table' AND ArchiveDatabaseName = N'$ArchiveDatabaseName' AND YYYYMM = $period;" -ErrorAction Stop -EnableException).RowsArchived
-				$sourceRowsNow = [int64](Invoke-DbaQuery @connParams -Database $Database -Query "SELECT COUNT(*) AS Cnt FROM [$Schema].[$Table] WHERE [$DateColumn] >= $periodStartLit AND [$DateColumn] < $periodEndLit;" -ErrorAction Stop -EnableException).Cnt
+				$loggedRows = [int64](Invoke-DbaQuery @connParams -Database $Database -Query "SELECT RowsArchived FROM dbo.sqm_ArchiveMonthLog WHERE SchemaName = N'$Schema' AND TableName = N'$Table' AND ArchiveDatabaseName = N'$ArchiveDatabaseName' AND YYYYMM = $period;" -ErrorAction Stop -EnableException -As PSObject)[0].RowsArchived
+				$sourceRowsNow = [int64](Invoke-DbaQuery @connParams -Database $Database -Query "SELECT COUNT(*) AS Cnt FROM [$Schema].[$Table] WHERE [$DateColumn] >= $periodStartLit AND [$DateColumn] < $periodEndLit;" -ErrorAction Stop -EnableException -As PSObject)[0].Cnt
 
 				if ($sourceRowsNow -ne $loggedRows)
 				{
@@ -622,7 +631,7 @@ SELECT @RowsThisCall AS RowsThisCall, @MonthComplete AS MonthComplete;
 					while ($rowsAffected -gt 0)
 					{
 						$purgeSql = "DELETE TOP ($BatchSize) FROM [$Schema].[$Table] WHERE [$DateColumn] >= $periodStartLit AND [$DateColumn] < $periodEndLit; SELECT @@ROWCOUNT AS Cnt;"
-						$rowsAffected = [int64](Invoke-DbaQuery @connParams -Database $Database -Query $purgeSql -ErrorAction Stop -EnableException).Cnt
+						$rowsAffected = [int64](Invoke-DbaQuery @connParams -Database $Database -Query $purgeSql -ErrorAction Stop -EnableException -As PSObject)[0].Cnt
 						$deletedThisPeriod += $rowsAffected
 					}
 					$totalPurgedRows += $deletedThisPeriod
