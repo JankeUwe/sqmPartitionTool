@@ -249,7 +249,7 @@ SELECT MAX([Key_]) AS LastKey, COUNT(*) AS Cnt FROM @KeyTable;
 
 				$batchResult = Invoke-DbaQuery @connParams -Database $Database -Query $batchSql -ErrorAction Stop -EnableException -As PSObject
 				if (-not $batchResult -or -not $batchResult[0]) { throw "Batch-Abfrage gab kein Ergebnis zurueck." }
-				$rowsThisBatch = [int64]($batchResult[0].Cnt ?? 0)
+				$rowsThisBatch = [int64]$(if ($null -ne $batchResult[0].Cnt) { $batchResult[0].Cnt } else { 0 })
 				if ($rowsThisBatch -eq 0) { break }
 
 				$lastKeyValue = $batchResult[0].LastKey

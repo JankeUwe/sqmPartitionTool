@@ -592,8 +592,8 @@ SELECT @RowsThisCall AS RowsThisCall, @MonthComplete AS MonthComplete;
 "@
 				$batchResult = Invoke-DbaQuery @connParams -Database $Database -Query $batchSql -ErrorAction Stop -EnableException -As PSObject
 				if (-not $batchResult -or $null -eq $batchResult[0]) { throw "sqm_ArchiveMonthBatch returned no result set." }
-				$rowsThisCall = [int64]($batchResult[0].RowsThisCall ?? 0)
-				$monthComplete = [bool]($batchResult[0].MonthComplete ?? $false)
+				$rowsThisCall = [int64]$(if ($null -ne $batchResult[0].RowsThisCall) { $batchResult[0].RowsThisCall } else { 0 })
+				$monthComplete = [bool]$(if ($null -ne $batchResult[0].MonthComplete) { $batchResult[0].MonthComplete } else { $false })
 				$totalRows += $rowsThisCall
 				$rowsThisPeriod += $rowsThisCall
 				Invoke-sqmLogging -Message "Monat $period : $rowsThisCall Zeile(n) in diesem Batch verarbeitet - $(if ($monthComplete) { 'Monat abgeschlossen' } else { 'weitere Batches folgen' })." -FunctionName $functionName -Level "INFO"

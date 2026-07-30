@@ -531,11 +531,13 @@ WHERE p.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND p.index_id IN (0, 1);
 				$keyColsWithPartition = if ($PartitionColumn -in $existingKeyCols) { $existingKeyCols } else { $existingKeyCols + $PartitionColumn }
 				$keyColList = ($keyColsWithPartition | ForEach-Object { "[$_]" }) -join ', '
 
-				if ((($ci.is_primary_key ?? $false) -or ($ci.is_unique_constraint ?? $false)) -and $PartitionColumn -notin $existingKeyCols)
+				$ciIsPrimaryKey = if ($null -ne $ci.is_primary_key) { [bool]$ci.is_primary_key } else { $false }
+				$ciIsUniqueConstraint = if ($null -ne $ci.is_unique_constraint) { [bool]$ci.is_unique_constraint } else { $false }
+				if (($ciIsPrimaryKey -or $ciIsUniqueConstraint) -and $PartitionColumn -notin $existingKeyCols)
 				{
 					# PK/UNIQUE-Constraint muss neu definiert werden (DROP_EXISTING allein reicht hier nicht,
 					# die Constraint-Spaltenliste muss die Partitionsspalte mit enthalten).
-					$constraintType = if ($ci.is_primary_key ?? $false) { 'PRIMARY KEY' } else { 'UNIQUE' }
+					$constraintType = if ($ciIsPrimaryKey) { 'PRIMARY KEY' } else { 'UNIQUE' }
 					$ddl = @"
 ALTER TABLE [$Schema].[$Table] DROP CONSTRAINT [$($ci.IndexName)];
 ALTER TABLE [$Schema].[$Table] ADD CONSTRAINT [$($ci.IndexName)] $constraintType CLUSTERED ($keyColList)
@@ -544,7 +546,8 @@ ALTER TABLE [$Schema].[$Table] ADD CONSTRAINT [$($ci.IndexName)] $constraintType
 				}
 				else
 				{
-					$uniqueKw = if ($ci.is_unique ?? $false) { 'UNIQUE ' } else { '' }
+					$ciIsUnique = if ($null -ne $ci.is_unique) { [bool]$ci.is_unique } else { $false }
+					$uniqueKw = if ($ciIsUnique) { 'UNIQUE ' } else { '' }
 					$ddl = @"
 CREATE ${uniqueKw}CLUSTERED INDEX [$($ci.IndexName)]
     ON [$Schema].[$Table] ($keyColList)
