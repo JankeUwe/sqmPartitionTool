@@ -1,5 +1,7 @@
 # sqmPartitionTool
 
+Teil der [powershelldba.de](https://www.powershelldba.de) SQL-Server-Tools von [Uwe Janke](https://www.powershelldba.de) — Projektseite: [powershelldba.de/sqmpartitiontool](https://www.powershelldba.de/sqmpartitiontool/)
+
 Automatische SQL-Server-Tabellen-Partitionierung — GUI und CLI.
 
 Baut auf [dbatools](https://dbatools.io) und [sqmSQLTool](https://github.com/JankeUwe/sqmSQLTool)
@@ -15,6 +17,10 @@ auf (Logging, Konfiguration, WinForms-Theme werden von sqmSQLTool wiederverwende
 - Automatisches Entfernen alter Partitionen nach konfigurierbarer Aufbewahrung
   (Monate/Jahre), optional mit Auslagerung in eine Archiv-Datenbank auf
   derselben Instanz — über einen zweiten SQL-Agent-Job.
+- Vollstaendige Migration einer aktiven Tabelle in eine separate Archiv-Datenbank
+  (`Invoke-sqmTableArchiveMigration`) — monatsweise per MERGE, fortsetzbar, mit
+  optionalem Cutover (Quelltabelle wird durch eine View auf die Archiv-Kopie
+  ersetzt, bestehender Anwendungscode laeuft unveraendert weiter).
 - WinForms-GUI-Assistent (`Show-sqmPartitionToolGui`) und vollständige CLI
   (alle Kernfunktionen sind eigenständig aus der PowerShell-Konsole nutzbar).
 
@@ -27,7 +33,7 @@ auf (Logging, Konfiguration, WinForms-Theme werden von sqmSQLTool wiederverwende
 ## Installation
 
 ```powershell
-Import-Module "C:\CMP\SQL-Tools\sqmPartitionTool\sqmPartitionTool.psd1"
+Import-Module "C:\CCM\SQL-Tools\sqmPartitionTool\sqmPartitionTool.psd1"
 ```
 
 ## Schnellstart
@@ -46,7 +52,8 @@ New-sqmPartitionExtendJob -SqlInstance "SQL01"
 New-sqmPartitionRetentionJob -SqlInstance "SQL01"
 ```
 
-Siehe [CHANGELOG.md](CHANGELOG.md) für die Versionshistorie.
+Siehe [docs/AdminHandbuch.md](docs/AdminHandbuch.md) für detaillierte Ablaufplaene je Szenario
+und [CHANGELOG.md](CHANGELOG.md) für die Versionshistorie.
 
 ## Lizenz
 

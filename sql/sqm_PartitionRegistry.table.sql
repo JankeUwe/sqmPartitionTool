@@ -41,6 +41,10 @@ BEGIN
         ArchiveSchemaName       SYSNAME       NULL,
         -- Batchgroesse fuer die Kopie in die Archiv-Datenbank
         ArchiveBatchSize        INT           NOT NULL CONSTRAINT DF_sqm_PartitionRegistry_ArchiveBatchSize DEFAULT (50000),
+        -- None | Row | Page - wird beim automatischen Retention-Sweep per ALTER TABLE ... REBUILD
+        -- auf die Archiv-Kopie angewendet (siehe Invoke-sqmPartitionArchive); nur relevant, wenn
+        -- ArchiveEnabled=1, da unkomprimiert geloeschte Partitionen keine Kompression brauchen
+        DataCompression         VARCHAR(10)   NOT NULL CONSTRAINT DF_sqm_PartitionRegistry_DataCompression DEFAULT ('None'),
         -- IsActive=0: Tabelle bleibt partitioniert, wird aber von den Wartungs-Jobs ignoriert
         -- (Register-sqmPartitionTable/Remove-sqmPartitionRegistration steuern dieses Flag)
         IsActive                BIT           NOT NULL CONSTRAINT DF_sqm_PartitionRegistry_IsActive DEFAULT (1),
@@ -63,5 +67,18 @@ AND NOT EXISTS (
 )
 BEGIN
     ALTER TABLE master.dbo.sqm_PartitionRegistry ADD SurrogateDateFormat VARCHAR(10) NULL;
+END
+GO
+
+-- Migrationspfad fuer bereits vor der DataCompression-Erweiterung angelegte Registry-Tabellen.
+IF EXISTS (
+    SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'master.dbo.sqm_PartitionRegistry') AND type = 'U'
+)
+AND NOT EXISTS (
+    SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'master.dbo.sqm_PartitionRegistry') AND name = 'DataCompression'
+)
+BEGIN
+    ALTER TABLE master.dbo.sqm_PartitionRegistry ADD DataCompression VARCHAR(10) NOT NULL
+        CONSTRAINT DF_sqm_PartitionRegistry_DataCompression DEFAULT ('None');
 END
 GO

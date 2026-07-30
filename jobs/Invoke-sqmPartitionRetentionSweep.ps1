@@ -63,6 +63,7 @@ foreach ($t in $tables)
             $archiveParams['ArchiveDatabaseName'] = $t.ArchiveDatabaseName
             if ($t.ArchiveSchemaName) { $archiveParams['ArchiveSchemaName'] = $t.ArchiveSchemaName }
             if ($t.ArchiveBatchSize) { $archiveParams['ArchiveBatchSize'] = [int]$t.ArchiveBatchSize }
+            if ($t.DataCompression -and $t.DataCompression -ne 'None') { $archiveParams['DataCompression'] = [string]$t.DataCompression }
         }
 
         # Status wird JEDE Iteration neu gelesen statt einmal vorab als Liste geplant: jedes

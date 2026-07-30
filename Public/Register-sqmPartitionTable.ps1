@@ -48,6 +48,10 @@
     Invoke-sqmPartitionArchive).
 .PARAMETER ArchiveSchemaName
     Ziel-Schema in der Archiv-Datenbank. Standard: gleiches Schema wie die Quelltabelle.
+.PARAMETER DataCompression
+    None (Standard), Row oder Page. Wird vom automatischen Retention-Sweep per
+    ALTER TABLE ... REBUILD auf die Archiv-Kopie angewendet - nur relevant, wenn -ArchiveEnabled
+    gesetzt ist (eine nur geloeschte, nicht archivierte Partition braucht keine Kompression).
 .PARAMETER IsActive
     Ob die Tabelle von den Wartungs-Jobs beruecksichtigt wird. Standard: $true.
 .PARAMETER SqlCredential
@@ -125,6 +129,10 @@ function Register-sqmPartitionTable
 		[string]$ArchiveSchemaName,
 
 		[Parameter(Mandatory = $false)]
+		[ValidateSet('None', 'Row', 'Page')]
+		[string]$DataCompression = 'None',
+
+		[Parameter(Mandatory = $false)]
 		[bool]$IsActive = $true,
 
 		[Parameter(Mandatory = $false)]
@@ -178,15 +186,16 @@ WHEN MATCHED THEN UPDATE SET
     ArchiveEnabled = $([int][bool]$ArchiveEnabled),
     ArchiveDatabaseName = $archDbSql,
     ArchiveSchemaName = $archSchemaSql,
+    DataCompression = N'$DataCompression',
     IsActive = $([int]$IsActive)
 WHEN NOT MATCHED THEN INSERT
     (DatabaseName, SchemaName, TableName, PartitionColumn, PartitionFunctionName, PartitionSchemeName,
      Granularity, BoundaryType, SurrogateDateFormat, FilegroupStrategy, FutureBufferPeriods, RetentionValue, RetentionUnit,
-     ArchiveEnabled, ArchiveDatabaseName, ArchiveSchemaName, IsActive)
+     ArchiveEnabled, ArchiveDatabaseName, ArchiveSchemaName, DataCompression, IsActive)
 VALUES
     (N'$Database', N'$Schema', N'$Table', N'$PartitionColumn', N'$PartitionFunctionName', N'$PartitionSchemeName',
      N'$Granularity', N'$BoundaryType', $surrFmtSql, N'$FilegroupStrategy', $FutureBufferPeriods, $retValSql, $retUnitSql,
-     $([int][bool]$ArchiveEnabled), $archDbSql, $archSchemaSql, $([int]$IsActive));
+     $([int][bool]$ArchiveEnabled), $archDbSql, $archSchemaSql, N'$DataCompression', $([int]$IsActive));
 "@
 
 	try

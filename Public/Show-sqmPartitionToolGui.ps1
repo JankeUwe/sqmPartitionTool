@@ -564,8 +564,22 @@
     $num4Buffer.BackColor = $cWindow
     $num4Buffer.ForeColor = $cText
 
+    $lbl4e = New-Object System.Windows.Forms.Label
+    $lbl4e.Text = 'Data Compression:'
+    $lbl4e.Location = New-Object System.Drawing.Point(4, 132)
+    $lbl4e.AutoSize = $true
+    $lbl4e.ForeColor = $cDim
+    $cmb4Comp = New-Object System.Windows.Forms.ComboBox
+    $cmb4Comp.Location = New-Object System.Drawing.Point(140, 128)
+    $cmb4Comp.Size = New-Object System.Drawing.Size(150, 24)
+    $cmb4Comp.BackColor = $cWindow
+    $cmb4Comp.ForeColor = $cText
+    $cmb4Comp.DropDownStyle = 'DropDownList'
+    [void]$cmb4Comp.Items.AddRange(@('None', 'Row', 'Page'))
+    $cmb4Comp.SelectedIndex = 0
+
     $lbl4Warn = New-Object System.Windows.Forms.Label
-    $lbl4Warn.Location = New-Object System.Drawing.Point(4, 130)
+    $lbl4Warn.Location = New-Object System.Drawing.Point(4, 170)
     $lbl4Warn.Size = New-Object System.Drawing.Size(900, 40)
     $lbl4Warn.ForeColor = $cWarn
     $lbl4Warn.Text = ''
@@ -574,12 +588,12 @@
     # z.B. YYYYMMDD oder YYYYMM als int/varchar) - siehe Confirm-StepAndAdvance Case 3.
     $lbl4d = New-Object System.Windows.Forms.Label
     $lbl4d.Text = 'Surrogate Date Format:'
-    $lbl4d.Location = New-Object System.Drawing.Point(4, 182)
+    $lbl4d.Location = New-Object System.Drawing.Point(4, 222)
     $lbl4d.AutoSize = $true
     $lbl4d.ForeColor = $cDim
     $lbl4d.Visible = $false
     $cmb4Fmt = New-Object System.Windows.Forms.ComboBox
-    $cmb4Fmt.Location = New-Object System.Drawing.Point(140, 178)
+    $cmb4Fmt.Location = New-Object System.Drawing.Point(140, 218)
     $cmb4Fmt.Size = New-Object System.Drawing.Size(150, 24)
     $cmb4Fmt.BackColor = $cWindow
     $cmb4Fmt.ForeColor = $cText
@@ -591,6 +605,7 @@
     $p4.Controls.Add($lbl4a); $p4.Controls.Add($cmb4Gran)
     $p4.Controls.Add($lbl4b); $p4.Controls.Add($cmb4Fg)
     $p4.Controls.Add($lbl4c); $p4.Controls.Add($num4Buffer)
+    $p4.Controls.Add($lbl4e); $p4.Controls.Add($cmb4Comp)
     $p4.Controls.Add($lbl4Warn)
     $p4.Controls.Add($lbl4d); $p4.Controls.Add($cmb4Fmt)
 
@@ -643,6 +658,7 @@
             $script:wiz.Granularity = [string]$cmb4Gran.SelectedItem
             $script:wiz.FilegroupStrategy = if ($cmb4Fg.SelectedIndex -eq 1) { 'PerPeriod' } else { 'Single' }
             $script:wiz.FutureBufferPeriods = [int]$num4Buffer.Value
+            $script:wiz.DataCompression = if ($cmb4Comp.SelectedItem) { [string]$cmb4Comp.SelectedItem } else { 'None' }
             $dateTypesGui = @('date', 'datetime', 'datetime2', 'smalldatetime', 'datetimeoffset')
             $textTypesGui = @('char', 'varchar', 'nchar', 'nvarchar')
             $script:wiz.BoundaryType = if ($script:wiz.DataType -in $dateTypesGui) { 'Date' } elseif ($script:wiz.DataType -in $textTypesGui) { 'Text' } else { 'Int' }
@@ -895,6 +911,7 @@ ORDER BY ic.key_ordinal
         $lines.Add("Granularity          : $($script:wiz.Granularity) | BoundaryType: $($script:wiz.BoundaryType)" +
             $(if ($script:wiz.BoundaryType -ne 'Date') { " | SurrogateDateFormat: $($script:wiz.SurrogateDateFormat)" } else { '' }))
         $lines.Add("Filegroup Strategy   : $($script:wiz.FilegroupStrategy) | Future Buffer: $($script:wiz.FutureBufferPeriods) period(s)")
+        $lines.Add("Data Compression     : $($script:wiz.DataCompression)")
         if ($chk6MigrateNow.Checked)
         {
             $lines.Add("Mode                 : Migrate to archive database NOW -> '$($txt6ArchiveDb.Text.Trim())'")
@@ -956,6 +973,7 @@ ORDER BY ic.key_ordinal
                     Granularity             = $script:wiz.Granularity
                     FilegroupStrategy       = $script:wiz.FilegroupStrategy
                     FutureBufferPeriods     = $script:wiz.FutureBufferPeriods
+                    DataCompression         = $script:wiz.DataCompression
                     AllowKeyChange          = $true
                     PurgeSourceAfterArchive = $true
                     CutoverToArchiveView    = $true
@@ -1013,6 +1031,7 @@ ORDER BY ic.key_ordinal
                 SurrogateDateFormat = $script:wiz.SurrogateDateFormat
                 FilegroupStrategy   = $script:wiz.FilegroupStrategy
                 FutureBufferPeriods = $script:wiz.FutureBufferPeriods
+                DataCompression     = $script:wiz.DataCompression
                 AllowKeyChange      = $true
                 Confirm             = $false
                 ErrorAction         = 'Stop'
@@ -1043,6 +1062,7 @@ ORDER BY ic.key_ordinal
                     FilegroupStrategy     = $script:wiz.FilegroupStrategy
                     RetentionValue        = [int]$num6Retention.Value
                     RetentionUnit         = [string]$cmb6Unit.SelectedItem
+                    DataCompression       = $script:wiz.DataCompression
                     Confirm               = $false
                     ErrorAction           = 'Stop'
                 }
