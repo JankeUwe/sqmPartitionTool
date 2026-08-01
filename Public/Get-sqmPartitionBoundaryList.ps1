@@ -85,7 +85,11 @@ function Get-sqmPartitionBoundaryList
 		{
 			return [datetime]::ParseExact([string]$value, $dateFormat, $null)
 		}
-		return [datetime]$value
+		if ($value -is [datetime]) { return $value }
+		# Bare [datetime]-Cast ignoriert bei mehrdeutigen Strings (z.B. '1.06.2026') die aktuelle
+		# Kultur und parst nach invarianter Monat.Tag.Jahr-Reihenfolge statt Tag.Monat.Jahr (de-DE) -
+		# verfaelscht MinValue/MaxValue lautlos, wenn Tag <= 12 ist. Explizit mit Get-Culture parsen.
+		return [datetime]::Parse([string]$value, (Get-Culture))
 	}
 
 	function _PeriodStart([datetime]$date, [string]$granularity)
