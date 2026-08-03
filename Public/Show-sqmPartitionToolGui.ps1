@@ -115,6 +115,7 @@
         SurrogateDateFormat = 'yyyyMMdd'
         FilegroupStrategy   = 'Single'
         FutureBufferPeriods = 3
+        DataCompression     = 'None'
         AllowKeyChange      = $false
         Boundaries          = $null
         ArchiveEnabled      = $false

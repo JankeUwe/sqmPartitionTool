@@ -80,9 +80,11 @@
     Nur -Method BatchedSwap: Zeilen pro Kopier-/Loeschbatch *innerhalb* eines Boundary-Segments.
     Standard: 50000.
 .PARAMETER DataCompression
-    Nur -Method BatchedSwap: None (Standard), Row oder Page. Wird direkt nach dem Anlegen der
-    neuen (noch leeren) partitionierten Kopie angewendet (ALTER TABLE ... REBUILD
-    PARTITION = ALL WITH (DATA_COMPRESSION = ...) - CREATE TABLE kennt keine Kompressions-Klausel).
+    None (Standard), Row oder Page. Wird bei allen drei -Method-Varianten direkt nach dem
+    Umstellen auf das Partition Scheme angewendet (ALTER TABLE ... REBUILD PARTITION = ALL WITH
+    (DATA_COMPRESSION = ...) - weder CREATE (CLUSTERED) INDEX noch CREATE TABLE kennen eine
+    Kompressions-Klausel). Ein Fehlschlagen (z.B. Edition ohne Kompressionsunterstuetzung) bricht
+    den Umbau NICHT ab, sondern wird nur als Warnung geloggt.
 .PARAMETER ShrinkAfterEveryNSegments
     Nur -Method BatchedSwap: nach wie vielen geleerten Boundary-Segmenten DBCC SHRINKFILE (siehe
     -AggressiveShrink) auf den Datendateien der aktuellen Filegroup der ALTEN Tabelle ausgefuehrt
@@ -593,6 +595,21 @@ CREATE CLUSTERED INDEX [IX_${Table}_$PartitionColumn]
 				$msg = "Fehler beim Umstellen von '$Schema.$Table' auf das Partition Scheme: $($_.Exception.Message)"
 				Invoke-sqmLogging -Message $msg -FunctionName $functionName -Level "ERROR"
 				throw
+			}
+
+			if ($DataCompression -ne 'None')
+			{
+				Invoke-sqmLogging -Message "$DataCompression-Kompression wird auf '$Schema.$Table' angewendet - alle Partitionen werden gebuendelt (kann bei grossen Tabellen mehrere Stunden dauern)." -FunctionName $functionName -Level "WARNING"
+				try
+				{
+					$compressionSql = "ALTER TABLE [$Schema].[$Table] REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = $($DataCompression.ToUpper()));"
+					Invoke-DbaQuery @connParams -Query $compressionSql -ErrorAction Stop -EnableException -As PSObject | Out-Null
+					Invoke-sqmLogging -Message "$DataCompression-Kompression auf '$Schema.$Table' abgeschlossen (alle Partitionen)." -FunctionName $functionName -Level "INFO"
+				}
+				catch
+				{
+					Invoke-sqmLogging -Message "Fehler bei Kompressionsanwendung (Umbau wird fortgesetzt): $($_.Exception.Message). Kompression kann spaeter manuell mit ALTER TABLE ... REBUILD PARTITION angewendet werden." -FunctionName $functionName -Level "WARNING"
+				}
 			}
 		}
 

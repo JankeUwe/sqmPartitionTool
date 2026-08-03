@@ -1,5 +1,48 @@
 # sqmPartitionTool — Changelog
 
+## [1.7.2.0] — 2026-08-03
+
+### Fix: GUI wizard crashes at Step 4 "Data Compression" with "property ... cannot be found"
+
+User-reported error (German UI): `Ausnahme beim Festlegen von "DataCompression": "Die Eigenschaft
+"DataCompression" wurde fuer dieses Objekt nicht gefunden. Ueberpruefen Sie, dass die Eigenschaft
+vorhanden ist und festgelegt werden kann."` when clicking "Next" on Step 4.
+
+Root cause: `Show-sqmPartitionToolGui.ps1` keeps wizard state in `$script:wiz`, a
+`[PSCustomObject]@{...}` literal. Unlike a hashtable, a `[PSCustomObject]` literal does NOT
+support adding a new property via dot-notation after creation - `$obj.NewProp = value` throws
+exactly this "property cannot be found" `SetValueInvocationException` unless `NewProp` was already
+present in the original literal (verified directly: `[PSCustomObject]@{A=1}; $o.B = 2` throws the
+identical message on real PS 5.1). The Step 4 handler at line 661 does
+`$script:wiz.DataCompression = ...`, but `DataCompression` was missing from the initial
+`$script:wiz` property list (every other property later assigned - `Boundaries`, `MinValue`,
+`FilegroupStrategy`, etc. - was already declared there) - so this one assignment reliably crashed
+the wizard every time Step 4 was completed.
+
+- Fix: added `DataCompression = 'None'` to the initial `$script:wiz` literal so the later
+  assignment just updates an existing property instead of trying to create a new one.
+
+### Fix: `-DataCompression` silently ignored for `-Method Default`/`NewTableSwap`
+
+Bug report from the GUI wizard (Step 4 "Data Compression"): the conversion reported success, but
+the resulting table's partitions were never actually compressed. Root cause: `-DataCompression`
+was only ever applied inside the `-Method BatchedSwap` branch of `Invoke-sqmTablePartitionConversion`
+(`ALTER TABLE ... REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = ...)` right after building the
+new swap table). The `Default` and `NewTableSwap` branches (the ones the GUI wizard actually uses -
+it never sets `-Method`) built the partitioned table via `CREATE (CLUSTERED) INDEX ... WITH
+(DROP_EXISTING = ON) ON <scheme>` and never referenced `$DataCompression` at all, so the parameter
+was silently a no-op there - no error, no warning, `Status = 'Success'`.
+
+- Verified against DEV01 (`PartitionTestDB.dbo.sqmTestCompress`, 400 rows, `-Method Default
+  -DataCompression Row`): before the fix, all 18 partitions came back `data_compression_desc =
+  NONE` despite `Status = Success`; after the fix, all 18 show `ROW`.
+- Fix: apply the same `ALTER TABLE ... REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = ...)`
+  (in the same non-fatal try/catch as the BatchedSwap branch - a compression failure, e.g. an
+  edition without compression support, logs a WARNING and lets the conversion complete rather
+  than aborting an otherwise-successful partitioning run) right after the `CREATE (CLUSTERED)
+  INDEX`/heap DDL in the `Default`/`NewTableSwap` branch too, so `-DataCompression` now behaves
+  identically across all three `-Method` values.
+
 ## [1.7.0.0] — 2026-07-06
 
 ### Merged two changes developed in parallel (DEV02/DEV03)
