@@ -1,5 +1,30 @@
 # sqmPartitionTool — Changelog
 
+## [1.8.1.0] — 2026-08-27
+
+### Fix: `Invoke-sqmTableRelocation -TargetSchemaName` created the schema in the SOURCE database, not the target
+
+Spotted while building `Copy-sqmPartitionedTable` (v1.8.0.0, see below), which needed the same
+"create target schema if missing" logic and got it right by comparison. Root cause:
+
+```powershell
+Invoke-DbaQuery @connParams -Database $Database -Query "IF SCHEMA_ID(N'$TargetSchemaName') IS NULL EXEC(N'CREATE SCHEMA [$TargetSchemaName]');" ...
+```
+
+`-Database $Database` is the SOURCE database - `CREATE SCHEMA` ran there instead of in
+`$TargetDatabaseName`, where the very next statement (`SELECT * INTO
+[$TargetDatabaseName].[$TargetSchemaName].[$Table] ...`) actually needs it. Latent bug: since
+`-TargetSchemaName` defaults to the source `-Schema` (usually `dbo`, which already exists
+everywhere), it only surfaces when a caller explicitly passes a `-TargetSchemaName` that doesn't
+yet exist in the target database - then `SELECT INTO` would fail with an invalid-schema error
+instead of the schema being auto-created as intended.
+
+- Fix: changed `-Database $Database` to `-Database $TargetDatabaseName` on that line.
+- Verified live against DEV01: `Invoke-sqmTableRelocation` from `PartitionTestDB.dbo.sqmRelocSrc`
+  to `ArchiveTestDB.sqmRelocFixTest.sqmRelocSrc` (schema `sqmRelocFixTest` did not exist in either
+  database beforehand) - after the fix, the schema was created only in `ArchiveTestDB` (never in
+  `PartitionTestDB`), and the relocation completed successfully (50 rows, cutover done).
+
 ## [1.8.0.0] — 2026-08-27
 
 ### Feature: `Copy-sqmPartitionedTable` — copy an already-partitioned table into another database with a NEW partitioning scheme

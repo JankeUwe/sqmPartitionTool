@@ -205,7 +205,7 @@ ORDER BY ic.key_ordinal
 			$targetExists = Invoke-DbaQuery @connParams -Database $Database -Query "SELECT 1 FROM [$TargetDatabaseName].sys.tables t JOIN [$TargetDatabaseName].sys.schemas s ON s.schema_id = t.schema_id WHERE s.name = N'$TargetSchemaName' AND t.name = N'$Table'" -ErrorAction Stop -EnableException -As PSObject
 			if (-not $targetExists)
 			{
-				Invoke-DbaQuery @connParams -Database $Database -Query "IF SCHEMA_ID(N'$TargetSchemaName') IS NULL EXEC(N'CREATE SCHEMA [$TargetSchemaName]');" -ErrorAction Stop -EnableException -As PSObject | Out-Null
+				Invoke-DbaQuery @connParams -Database $TargetDatabaseName -Query "IF SCHEMA_ID(N'$TargetSchemaName') IS NULL EXEC(N'CREATE SCHEMA [$TargetSchemaName]');" -ErrorAction Stop -EnableException -As PSObject | Out-Null
 				Invoke-DbaQuery @connParams -Database $Database -Query "SELECT * INTO [$TargetDatabaseName].[$TargetSchemaName].[$Table] FROM [$Schema].[$Table] WHERE 1 = 0;" -ErrorAction Stop -EnableException -As PSObject | Out-Null
 				Invoke-DbaQuery @connParams -Database $Database -Query "CREATE $(if ($ciKeyRows) { 'CLUSTERED' } else { '' }) INDEX [IX_${Table}_${KeyColumn}] ON [$TargetDatabaseName].[$TargetSchemaName].[$Table] ([$KeyColumn]);" -ErrorAction Stop -EnableException -As PSObject | Out-Null
 				Invoke-sqmLogging -Message "Zieltabelle '$TargetDatabaseName.$TargetSchemaName.$Table' angelegt." -FunctionName $functionName -Level "INFO"
