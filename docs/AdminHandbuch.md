@@ -17,6 +17,7 @@ fuer eine Kurzuebersicht [README.md](../README.md).
 3. [Ablaufplan A: Bestehende Tabelle in-place partitionieren](#3-ablaufplan-a-bestehende-tabelle-in-place-partitionieren)
 4. [Ablaufplan B: Automatische Wartung einrichten (Sliding-Window + Retention)](#4-ablaufplan-b-automatische-wartung-einrichten)
 5. [Ablaufplan C: Tabelle in eine Archiv-Datenbank migrieren (Cutover)](#5-ablaufplan-c-tabelle-in-eine-archiv-datenbank-migrieren)
+5a. [Ablaufplan D: Bereits partitionierte Tabelle mit neuer Partitionierung kopieren](#5a-ablaufplan-d-bereits-partitionierte-tabelle-mit-neuer-partitionierung-kopieren)
 6. [BoundaryType/SurrogateDateFormat — Referenz](#6-boundarytypesurrogatedateformat--referenz)
 7. [GUI-Assistent: Schritt-fuer-Schritt](#7-gui-assistent-schritt-fuer-schritt)
 8. [Troubleshooting und bekannte Einschraenkungen](#8-troubleshooting-und-bekannte-einschraenkungen)
@@ -26,7 +27,7 @@ fuer eine Kurzuebersicht [README.md](../README.md).
 
 ## 1. Ueberblick
 
-Das Modul deckt vier unterschiedliche, unabhaengig voneinander nutzbare Szenarien ab. Die
+Das Modul deckt fuenf unterschiedliche, unabhaengig voneinander nutzbare Szenarien ab. Die
 Entscheidung, welches passt, haengt davon ab, **wo die Daten am Ende liegen sollen** und **ob die
 Tabelle aktiv bleibt**:
 
@@ -36,10 +37,13 @@ Tabelle aktiv bleibt**:
 | **B1** — Sliding-Window-Erweiterung | `New-sqmPartitionExtendJob` (SQL-Agent-Job) | Unveraendert (nur neue leere Partitionen kommen dazu) | Nach A: automatisch dafuer sorgen, dass nie "die letzte Partition" volllaeuft |
 | **B2** — Retention/Archivierung | `New-sqmPartitionRetentionJob` (SQL-Agent-Job) | Alte Partitionen werden geloescht oder vorher archiviert | Nach A: alte Daten nach X Monaten/Jahren automatisch entfernen |
 | **C** — Archiv-DB-Migration + Cutover | `Invoke-sqmTableArchiveMigration` | Umbenannt, durch eine View auf die Archiv-DB ersetzt | Ganze Tabelle soll dauerhaft in eine andere (typischerweise kleinere/langsamer angebundene) Datenbank umziehen, Anwendungscode aber unveraendert weiterlaufen |
+| **D** — Neu-partitionierte Kopie | `Copy-sqmPartitionedTable` | **Unveraendert, bleibt aktiv** (keine Umbenennung, kein Cutover) | Eine **bereits partitionierte** Tabelle soll zusaetzlich als eigenstaendige Kopie mit **anderer** Granularitaet/Filegroup-Strategie in einer anderen Datenbank existieren (z.B. Reporting-Abzug mit groeberer Granularitaet) |
 
 **Faustregel:** Wenn die Tabelle **in der Quelldatenbank bleiben** soll → A (+ optional B1/B2).
 Wenn die Tabelle **komplett in eine andere Datenbank** soll (z.B. Archiv-Instanz, separate
-Datenbank mit weniger Backup-/Storage-Anforderungen) → C.
+Datenbank mit weniger Backup-/Storage-Anforderungen) → C. Wenn die Quelltabelle **bereits
+partitioniert ist** und **parallel** mit einer anderen Partitionierung anderswo weiterexistieren
+soll (kein Cutover, keine Umbenennung) → D.
 
 ---
 
@@ -197,6 +201,50 @@ schnellere Batches da keine Cross-DB-Kommunikation noetig) — geeignet, wenn di
 Quelldatenbank bleiben soll, aber wenig Plattenplatz fuer eine klassische Ein-Schritt-Konvertierung
 vorhanden ist. Ablaufplan C ist die richtige Wahl, wenn die Daten **dauerhaft in eine andere
 Datenbank** sollen (typischerweise eine separate, guenstiger/anders gesicherte Archiv-Instanz).
+
+---
+
+## 5a. Ablaufplan D: Bereits partitionierte Tabelle mit neuer Partitionierung kopieren
+
+Ziel: eine **bereits partitionierte**, weiterhin aktive Tabelle soll zusaetzlich (nicht statt dessen)
+als eigenstaendige, **neu partitionierte** Kopie in einer anderen Datenbank existieren — z.B. mit
+groeberer Granularitaet fuer Reporting, oder als Testabzug vor einer geplanten Umstellung der
+Produktionstabelle. Im Unterschied zu Ablaufplan C gibt es **keinen Cutover**: die Quelltabelle wird
+nie umbenannt, nie durch eine View ersetzt und bleibt unter ihrem eigenen Partitionierungsschema
+vollstaendig unveraendert.
+
+1. **Zieldatenbank anlegen** (Admin-Aufgabe, nicht automatisiert — gleiche Begruendung wie bei C).
+2. **Schluessel pruefen:** wie bei Ablaufplan C wird fuer den Batch-Kopiervorgang eine eindeutige
+   Spalte benoetigt. Ein einspaltiger Clustered Index/PK wird automatisch erkannt; bei Heap oder
+   zusammengesetztem Schluessel ist `-KeyColumn` Pflicht. Diese Spalte muss **nicht** mit der neuen
+   Partitionsspalte identisch sein.
+3. **Kopie starten:**
+   ```powershell
+   Copy-sqmPartitionedTable -SqlInstance "SQL01" -Database "Sales" -Schema "dbo" -Table "OrderHistory" `
+       -TargetDatabaseName "SalesReporting" -Granularity Year -Confirm:$false
+   ```
+   Ablauf im Detail:
+   - Prueft, dass die Quelltabelle tatsaechlich bereits partitioniert ist (sonst Fehler mit Verweis
+     auf Ablaufplan A/C) und leitet die Partitionsspalte automatisch aus dem bestehenden Partition
+     Scheme ab, sofern `-PartitionColumn` nicht ausdruecklich eine andere Spalte vorgibt.
+   - Legt beim ersten Aufruf die neue Partitionierung (Filegroups, Partition Function/Scheme) in der
+     Zieldatenbank an und erstellt dort eine strukturell identische Tabelle (Spalten, Indizes,
+     PK/UNIQUE-Constraints — Fremdschluessel/Trigger werden **nicht** mitgenommen).
+   - Kopiert alle Zeilen batchweise per Keyset-Pagination (`-KeyColumn`, `-BatchSize`) — resumable:
+     ein Abbruch oder `-MaxDurationMinutes` kann jederzeit per erneutem Aufruf fortgesetzt werden,
+     der dann automatisch bei der zuletzt kopierten Zeile weitermacht und Schritt "Tabelle anlegen"
+     ueberspringt.
+   - Registriert die neue Tabelle in `sqm_PartitionRegistry` (ausser `-NoRegister`) — Ablaufplan B1
+     (Sliding-Window) kann fuer sie danach wie fuer jede andere partitionierte Tabelle eingerichtet
+     werden.
+4. **Verifikation:** Zeilenzahlen von Quelle und Kopie werden am Ende automatisch abgeglichen —
+   weichen sie ab (z.B. weil waehrend der Kopie neue Zeilen in die weiterhin aktive Quelle
+   eingefuegt wurden), bricht die Funktion mit einer Fehlermeldung ab; ein erneuter Aufruf kopiert
+   die Differenz nach.
+5. Live gegen DEV01 verifiziert (`PartitionTestDB.dbo.sqmCopyTestSrc`, Month-partitioniert, 2600
+   Zeilen → `ArchiveTestDB.dbo.sqmCopyTestDst`, neu partitioniert nach Year): Quelle blieb
+   unveraendert auf ihrem Month-Scheme, Zielkopie zeigte korrekte Year-Grenzen und identische
+   Zeilenzahl, ein erneuter Aufruf kopierte 0 zusaetzliche Zeilen (Resume-Pfad).
 
 ---
 

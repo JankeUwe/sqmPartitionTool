@@ -32,6 +32,11 @@
 .PARAMETER TargetTable
 	Name der neuen Tabelle, fuer die die DDL generiert wird (nicht notwendigerweise die Quelle -
 	z.B. eine Staging- oder Swap-Zieltabelle).
+.PARAMETER TargetSchema
+	Schema der neuen Tabelle. Standard: gleiches Schema wie die Quelltabelle (-Schema) - muss beim
+	Aufrufer bereits existieren (siehe Copy-sqmPartitionedTable, das es vorher per CREATE SCHEMA
+	sicherstellt). Nur bei einer NEUEN Tabelle in einer anderen Datenbank/einem anderen Schema als
+	die Quelle relevant.
 .PARAMETER FilegroupName
 	Einzelne Filegroup fuer Tabelle + alle Indizes/Constraints. Alternative zu
 	-PartitionSchemeName/-PartitionColumn.
@@ -77,6 +82,9 @@ function Get-sqmTableDefinitionSql
 		[string]$TargetTable,
 
 		[Parameter(Mandatory = $false)]
+		[string]$TargetSchema,
+
+		[Parameter(Mandatory = $false)]
 		[string]$FilegroupName,
 
 		[Parameter(Mandatory = $false)]
@@ -100,6 +108,7 @@ function Get-sqmTableDefinitionSql
 	{
 		throw "Get-sqmTableDefinitionSql: -PartitionColumn ist Pflicht wenn -PartitionSchemeName angegeben ist."
 	}
+	if (-not $TargetSchema) { $TargetSchema = $Schema }
 
 	$connParams = @{ SqlInstance = $SqlInstance; Database = $Database }
 	if ($SqlCredential) { $connParams['SqlCredential'] = $SqlCredential }
@@ -146,7 +155,7 @@ ORDER BY c.column_id
 			"[$($_.ColumnName)] $(_FormatColumnType $_)$identityClause $nullability"
 		}) -join ', '
 
-	$createTableSql = "CREATE TABLE [$Schema].[$TargetTable] ($colDefSql) ON $onClause;"
+	$createTableSql = "CREATE TABLE [$TargetSchema].[$TargetTable] ($colDefSql) ON $onClause;"
 
 	# 2. Indizes / PK / UNIQUE-Constraints ----------------------------------------------------------
 	# Ist ein Index als PRIMARY KEY/UNIQUE CONSTRAINT hinterlegt, akzeptiert SQL Server dafuer
@@ -195,12 +204,12 @@ ORDER BY ic.is_included_column, ic.key_ordinal, ic.index_column_id
 		{
 			$constraintKw = if ($idx.ConstraintType -eq 'PK') { 'PRIMARY KEY' } else { 'UNIQUE' }
 			$constraintName = "${constraintKw}_${TargetTable}_$($idx.index_id)" -replace ' ', '_'
-			$indexSql.Add("ALTER TABLE [$Schema].[$TargetTable] ADD CONSTRAINT [$constraintName] $constraintKw $clusterKw ($($keyCols -join ', ')) ON $onClause;")
+			$indexSql.Add("ALTER TABLE [$TargetSchema].[$TargetTable] ADD CONSTRAINT [$constraintName] $constraintKw $clusterKw ($($keyCols -join ', ')) ON $onClause;")
 		}
 		else
 		{
 			$uniqueKw = if ([bool]$idx.is_unique) { 'UNIQUE ' } else { '' }
-			$indexSql.Add("CREATE ${uniqueKw}${clusterKw} INDEX [IX_${TargetTable}_$($idx.index_id)] ON [$Schema].[$TargetTable] ($($keyCols -join ', '))$includeClause ON $onClause;")
+			$indexSql.Add("CREATE ${uniqueKw}${clusterKw} INDEX [IX_${TargetTable}_$($idx.index_id)] ON [$TargetSchema].[$TargetTable] ($($keyCols -join ', '))$includeClause ON $onClause;")
 		}
 	}
 

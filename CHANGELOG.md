@@ -1,5 +1,57 @@
 # sqmPartitionTool — Changelog
 
+## [1.8.0.0] — 2026-08-27
+
+### Feature: `Copy-sqmPartitionedTable` — copy an already-partitioned table into another database with a NEW partitioning scheme
+
+User request: enable turning an already-partitioned table into a new partitioned table in a
+different database, with a new (independent) partitioning scheme, exposed via the GUI wizard.
+Until now, every existing cross-database path (`Invoke-sqmTableRelocation`,
+`Invoke-sqmTableArchiveMigration`) assumed a NOT-yet-partitioned source and ended with a cutover
+(source renamed + replaced by a view) - there was no way to keep an already-partitioned source
+fully active while also producing an independent, differently-partitioned copy elsewhere. The GUI
+wizard's Step 1 actively rejected already-partitioned tables ("This table is already partitioned -
+please select another one").
+
+- Added `Public/Copy-sqmPartitionedTable.ps1`: auto-derives the source's existing partitioning
+  column from its partition scheme (`sys.index_columns.partition_ordinal = 1`) unless
+  `-PartitionColumn` overrides it, computes a brand-new boundary list for the requested
+  `-Granularity` from the source's live data range, builds the new filegroups/partition
+  scheme/function in the target database, creates a structurally identical target table on that
+  scheme (reusing `Get-sqmTableDefinitionSql`), and copies all rows via the same resumable
+  keyset-pagination batch pattern as `Invoke-sqmTableRelocation` (`-KeyColumn`, `-BatchSize`,
+  `-MaxDurationMinutes`). The source table is NEVER renamed, dropped, or replaced by a view - this
+  is a pure copy, not a migration. Registers the new table in `sqm_PartitionRegistry` unless
+  `-NoRegister`. A second call against an already-existing target table resumes the copy instead of
+  re-creating the scheme.
+- Extended `Private/Get-sqmTableDefinitionSql.ps1` with an optional `-TargetSchema` parameter
+  (defaults to `-Schema`, so the existing `Invoke-sqmTablePartitionConversion -Method BatchedSwap`
+  caller is unaffected) - needed because the target table can now live in a different schema than
+  the source, which the function's `CREATE TABLE`/index DDL previously always qualified with the
+  SOURCE schema regardless of `-TargetTable`.
+- Verified live against DEV01: `PartitionTestDB.dbo.sqmCopyTestSrc` (Month-partitioned via
+  `Invoke-sqmTablePartitionConversion`, 2600 rows, composite PK after `-AllowKeyChange`) copied to
+  `ArchiveTestDB.dbo.sqmCopyTestDst` with `-Granularity Year`: source scheme/row count unchanged
+  after the copy, target showed correct Year boundaries (2024/2025/2026/2027/2028/2029) and matching
+  row counts (2600/2600), `sqm_PartitionRegistry` entry created, and a second (resume) call
+  correctly copied 0 additional rows.
+- Wired into `Show-sqmPartitionToolGui.ps1`: Step 1 no longer rejects an already-partitioned table
+  ("This table is already partitioned - please select another one" is gone) - selecting one instead
+  sets a `SourceIsPartitioned` wizard flag. Steps 2-5 (column, min/max, granularity/filegroups,
+  boundary preview) are reused unchanged, since they already describe the NEW partitioning
+  regardless of the source's current state. Step 6 shows a dedicated "Copy to another database"
+  panel instead of the Migrate-now/Retention/Archive controls (mutually exclusive via
+  `Set-Step6Mode`), with its own single-column key-picker (`Test-Step6CopyKeyColumnNeed` -
+  deliberately a separate check function from the existing `Test-Step6KeyColumnNeed`, since
+  `Copy-sqmPartitionedTable` only auto-derives a single-column key, unlike
+  `Invoke-sqmTableArchiveMigration`'s up-to-4-column rule). Step 7 execute calls
+  `Copy-sqmPartitionedTable` instead of the conversion/migration functions when the flag is set.
+  Only the core engine function was exercised live against DEV01 (see above) - the GUI glue code
+  itself was verified by static parse check (`[System.Management.Automation.Language.Parser]`),
+  the repo's own `Tools/Test-DuplicateParameterBinding.ps1` (clean, 29 files), and a full module
+  import/export check, consistent with this module having no automated GUI tests (see
+  `Show-sqmPartitionToolGui.ps1` `.NOTES`) - an interactive click-through was not performed.
+
 ## [1.7.2.0] — 2026-08-03
 
 ### Fix: GUI wizard crashes at Step 4 "Data Compression" with "property ... cannot be found"

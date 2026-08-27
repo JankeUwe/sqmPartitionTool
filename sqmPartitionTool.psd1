@@ -11,7 +11,7 @@
 	RootModule             = 'sqmPartitionTool.psm1'
 
 	# Version number of this module.
-	ModuleVersion          = '1.7.2.0'
+	ModuleVersion          = '1.8.0.0'
 
 	# ID used to uniquely identify this module
 	GUID                   = 'dea1027c-a846-4dbe-8d25-6a4416525e06'
@@ -85,6 +85,7 @@
 		'Invoke-sqmPartitionArchive',
 		'Invoke-sqmTableRelocation',
 		'Invoke-sqmTableArchiveMigration',
+		'Copy-sqmPartitionedTable',
 		'Remove-sqmPartitionRegistration',
 		'New-sqmPartitionExtendJob',
 		'New-sqmPartitionRetentionJob',

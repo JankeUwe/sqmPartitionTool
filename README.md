@@ -21,6 +21,10 @@ auf (Logging, Konfiguration, WinForms-Theme werden von sqmSQLTool wiederverwende
   (`Invoke-sqmTableArchiveMigration`) — monatsweise per MERGE, fortsetzbar, mit
   optionalem Cutover (Quelltabelle wird durch eine View auf die Archiv-Kopie
   ersetzt, bestehender Anwendungscode laeuft unveraendert weiter).
+- Bereits partitionierte Tabelle als neue, eigenstaendige Kopie mit ANDERER
+  Partitionierung (Granularitaet/Filegroup-Strategie) in eine andere Datenbank
+  kopieren (`Copy-sqmPartitionedTable`) — resumable, ohne Cutover, die
+  Quelltabelle bleibt vollstaendig unveraendert aktiv.
 - WinForms-GUI-Assistent (`Show-sqmPartitionToolGui`) und vollständige CLI
   (alle Kernfunktionen sind eigenständig aus der PowerShell-Konsole nutzbar).
 

@@ -13,13 +13,20 @@
     Granularitaet + Filegroup-Strategie -> Boundary-Vorschau -> Archiv/Retention (optional) ->
     Zusammenfassung + Ausfuehren.
 
-    Fuehrt am Ende entweder Invoke-sqmTablePartitionConversion aus (In-Place-Partitionierung, optional
-    direkt im Anschluss Register-sqmPartitionTable mit Retention/Archiv-Einstellungen fuer eine
-    SPAETERE automatisierte Auslagerung einzelner Partitionen) - oder, wenn in Schritt 6 "Migrate to
-    archive database now" gewaehlt wurde, Invoke-sqmTableArchiveMigration (sofortige, monatsweise
-    Migration der GESAMTEN Tabelle in eine partitionierte Kopie in der Archiv-Datenbank samt
-    Cutover-View, siehe -CutoverToArchiveView dort). Beide Pfade schliessen sich fuer einen
-    Wizard-Durchlauf gegenseitig aus.
+    Fuehrt am Ende einen von drei Pfaden aus, abhaengig von der in Schritt 1 gewaehlten Tabelle und
+    den Optionen in Schritt 6 - fuer einen Wizard-Durchlauf schliessen sich alle drei gegenseitig aus:
+    - Quelle NICHT partitioniert, "Migrate to archive database now" NICHT gewaehlt:
+      Invoke-sqmTablePartitionConversion (In-Place-Partitionierung), optional direkt im Anschluss
+      Register-sqmPartitionTable mit Retention/Archiv-Einstellungen fuer eine SPAETERE
+      automatisierte Auslagerung einzelner Partitionen.
+    - Quelle NICHT partitioniert, "Migrate to archive database now" gewaehlt:
+      Invoke-sqmTableArchiveMigration (sofortige, monatsweise Migration der GESAMTEN Tabelle in eine
+      partitionierte Kopie in der Archiv-Datenbank samt Cutover-View, siehe -CutoverToArchiveView
+      dort).
+    - Quelle BEREITS partitioniert (Schritt 1 blockiert diese Auswahl nicht mehr - Schritt 6 zeigt
+      dann ausschliesslich einen "Copy to another database"-Bereich statt Migrate-now/Retention):
+      Copy-sqmPartitionedTable (neu partitionierte, eigenstaendige Kopie in einer anderen Datenbank,
+      OHNE Cutover - die Quelle bleibt unter ihrem bisherigen Schema vollstaendig unveraendert aktiv).
 
 .PARAMETER SqlInstance
     SQL-Instanz, die beim Oeffnen vorbelegt wird.
@@ -104,6 +111,7 @@
         SchemaName          = $null
         TableName           = $null
         IsHeap              = $false
+        SourceIsPartitioned = $false
         PartitionColumn     = $null
         DataType            = $null
         SuggestedGranularity = $null
@@ -772,12 +780,69 @@
     $txt6ArchiveDb.ForeColor = $cText
     $txt6ArchiveDb.BorderStyle = 'FixedSingle'
 
+    # Eigener Bereich fuer eine bereits partitionierte Quelltabelle (Ablaufplan D, siehe
+    # Copy-sqmPartitionedTable) - schliesst sich mit Migrate-now/Retention/Archive oben gegenseitig
+    # aus (Set-Step6Mode blendet je nach $script:wiz.SourceIsPartitioned den passenden Bereich ein).
+    $lbl6CopyInfo = New-Object System.Windows.Forms.Label
+    $lbl6CopyInfo.Text = "This table is already partitioned - it will be COPIED (not converted) into a new, independently partitioned table in another database. The source stays fully active and unchanged (no rename, no cutover view)."
+    $lbl6CopyInfo.Location = New-Object System.Drawing.Point(4, 8)
+    $lbl6CopyInfo.Size = New-Object System.Drawing.Size(900, 40)
+    $lbl6CopyInfo.ForeColor = $cText
+
+    $lbl6TargetDb = New-Object System.Windows.Forms.Label
+    $lbl6TargetDb.Text = 'Target Database:'
+    $lbl6TargetDb.Location = New-Object System.Drawing.Point(4, 56)
+    $lbl6TargetDb.AutoSize = $true
+    $lbl6TargetDb.ForeColor = $cDim
+    $txt6TargetDb = New-Object System.Windows.Forms.TextBox
+    $txt6TargetDb.Location = New-Object System.Drawing.Point(140, 52)
+    $txt6TargetDb.Size = New-Object System.Drawing.Size(200, 24)
+    $txt6TargetDb.BackColor = $cWindow
+    $txt6TargetDb.ForeColor = $cText
+    $txt6TargetDb.BorderStyle = 'FixedSingle'
+
+    $lbl6TargetTable = New-Object System.Windows.Forms.Label
+    $lbl6TargetTable.Text = 'Target Table Name:'
+    $lbl6TargetTable.Location = New-Object System.Drawing.Point(4, 88)
+    $lbl6TargetTable.AutoSize = $true
+    $lbl6TargetTable.ForeColor = $cDim
+    $txt6TargetTable = New-Object System.Windows.Forms.TextBox
+    $txt6TargetTable.Location = New-Object System.Drawing.Point(140, 84)
+    $txt6TargetTable.Size = New-Object System.Drawing.Size(200, 24)
+    $txt6TargetTable.BackColor = $cWindow
+    $txt6TargetTable.ForeColor = $cText
+    $txt6TargetTable.BorderStyle = 'FixedSingle'
+    $toolTip6TargetTable = New-Object System.Windows.Forms.ToolTip
+    $toolTip6TargetTable.SetToolTip($txt6TargetTable, 'Leave empty to keep the same table name in the target database.')
+
+    # Eigene CheckedListBox statt $clb6Key wiederzuverwenden - die Ableitungsregel unterscheidet
+    # sich (Copy-sqmPartitionedTable erlaubt fuer -KeyColumn nur einen einzelnen einspaltigen
+    # Clustered Index/PK, waehrend Invoke-sqmTableArchiveMigration bis zu 4 Spalten automatisch
+    # ableiten kann - ein gemeinsamer "needed"-Zustand waere hier irrefuehrend).
+    $lbl6CopyKey = New-Object System.Windows.Forms.Label
+    $lbl6CopyKey.Text = 'Key Column (table has no single-column unique key - pick one):'
+    $lbl6CopyKey.Location = New-Object System.Drawing.Point(24, 120)
+    $lbl6CopyKey.AutoSize = $true
+    $lbl6CopyKey.ForeColor = $cDim
+    $clb6CopyKey = New-Object System.Windows.Forms.CheckedListBox
+    $clb6CopyKey.Location = New-Object System.Drawing.Point(24, 144)
+    $clb6CopyKey.Size = New-Object System.Drawing.Size(300, 84)
+    $clb6CopyKey.BackColor = $cWindow
+    $clb6CopyKey.ForeColor = $cText
+    $clb6CopyKey.CheckOnClick = $true
+    $toolTip6CopyKey = New-Object System.Windows.Forms.ToolTip
+    $toolTip6CopyKey.SetToolTip($clb6CopyKey, 'Check exactly ONE column that uniquely identifies a row on its own (used for resumable batch copying, not for the new partitioning itself). Only shown because this table has no single-column clustered index/PK.')
+
     $p6.Controls.Add($chk6MigrateNow)
     $p6.Controls.Add($lbl6Key); $p6.Controls.Add($clb6Key)
     $p6.Controls.Add($chk6Retention)
     $p6.Controls.Add($lbl6a); $p6.Controls.Add($num6Retention); $p6.Controls.Add($cmb6Unit)
     $p6.Controls.Add($chk6Archive)
     $p6.Controls.Add($lbl6b); $p6.Controls.Add($txt6ArchiveDb)
+    $p6.Controls.Add($lbl6CopyInfo)
+    $p6.Controls.Add($lbl6TargetDb); $p6.Controls.Add($txt6TargetDb)
+    $p6.Controls.Add($lbl6TargetTable); $p6.Controls.Add($txt6TargetTable)
+    $p6.Controls.Add($lbl6CopyKey); $p6.Controls.Add($clb6CopyKey)
 
     # Prueft (einmalig pro Tabellenwahl), ob die aktuell gewaehlte Tabelle einen Schluessel hat, aus
     # dem Invoke-sqmTableArchiveMigration automatisch ableiten kann (1-4-spaltiger Clustered
@@ -820,9 +885,64 @@ ORDER BY ic.key_ordinal
         }
     }
 
+    # Prueft (einmalig pro Tabellenwahl), ob Copy-sqmPartitionedTable die Batch-Kopier-Schluesselspalte
+    # automatisch ableiten kann - ANDERE Regel als Test-Step6KeyColumnNeed oben (dort 1-4 Spalten
+    # erlaubt): Copy-sqmPartitionedTable akzeptiert fuer die Auto-Ableitung nur einen einzelnen
+    # einspaltigen Clustered Index/PK (siehe dortiger Kommentar zu 'ciKeyRows.Count -eq 1').
+    $script:step6CopyKeyColumnNeeded = $false
+    $script:step6CopyKeyColumnChecked = $false
+    function Test-Step6CopyKeyColumnNeed
+    {
+        if ($script:step6CopyKeyColumnChecked) { return }
+        $script:step6CopyKeyColumnChecked = $true
+        try
+        {
+            $cp = $script:connParams
+            $keyQuery = @"
+SELECT c.name AS ColumnName
+FROM sys.indexes i
+JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 0
+JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+WHERE i.object_id = OBJECT_ID(N'[$($script:wiz.SchemaName)].[$($script:wiz.TableName)]') AND i.index_id = 1
+ORDER BY ic.key_ordinal
+"@
+            $keyRows = @(Invoke-DbaQuery @cp -SqlInstance $script:wiz.SqlInstance -Database $script:wiz.Database -Query $keyQuery -ErrorAction Stop)
+            $script:step6CopyKeyColumnNeeded = ($keyRows.Count -ne 1)
+
+            if ($script:step6CopyKeyColumnNeeded)
+            {
+                $colQuery = "SELECT name FROM sys.columns WHERE object_id = OBJECT_ID(N'[$($script:wiz.SchemaName)].[$($script:wiz.TableName)]') ORDER BY column_id;"
+                $colRows = @(Invoke-DbaQuery @cp -SqlInstance $script:wiz.SqlInstance -Database $script:wiz.Database -Query $colQuery -ErrorAction Stop)
+                $clb6CopyKey.Items.Clear()
+                foreach ($c in $colRows) { [void]$clb6CopyKey.Items.Add($c.name) }
+            }
+        }
+        catch { $script:step6CopyKeyColumnNeeded = $true }
+    }
+
     function Set-Step6Mode
     {
-        $migrateNow = $chk6MigrateNow.Checked
+        $copyMode = $script:wiz.SourceIsPartitioned
+        $migrateNow = (-not $copyMode) -and $chk6MigrateNow.Checked
+
+        # --- Ablaufplan D: bereits partitionierte Quelle -> nur der Copy-Bereich ist sichtbar -----
+        $chk6MigrateNow.Visible = -not $copyMode
+        $lbl6CopyInfo.Visible = $copyMode
+        $lbl6TargetDb.Visible = $copyMode; $txt6TargetDb.Visible = $copyMode
+        $lbl6TargetTable.Visible = $copyMode; $txt6TargetTable.Visible = $copyMode
+        if ($copyMode) { Test-Step6CopyKeyColumnNeed }
+        $showCopyKey = $copyMode -and $script:step6CopyKeyColumnNeeded
+        $lbl6CopyKey.Visible = $showCopyKey; $clb6CopyKey.Visible = $showCopyKey
+
+        if ($copyMode)
+        {
+            $lbl6Key.Visible = $false; $clb6Key.Visible = $false
+            $chk6Retention.Visible = $false; $lbl6a.Visible = $false; $num6Retention.Visible = $false; $cmb6Unit.Visible = $false
+            $chk6Archive.Visible = $false; $lbl6b.Visible = $false; $txt6ArchiveDb.Visible = $false
+            return
+        }
+
+        # --- Ablaufplan A/B/C: unveraendertes bisheriges Verhalten --------------------------------
         if ($migrateNow) { Test-Step6KeyColumnNeed }
         $showKey = $migrateNow -and $script:step6KeyColumnNeeded
 
@@ -913,6 +1033,17 @@ ORDER BY ic.key_ordinal
             $(if ($script:wiz.BoundaryType -ne 'Date') { " | SurrogateDateFormat: $($script:wiz.SurrogateDateFormat)" } else { '' }))
         $lines.Add("Filegroup Strategy   : $($script:wiz.FilegroupStrategy) | Future Buffer: $($script:wiz.FutureBufferPeriods) period(s)")
         $lines.Add("Data Compression     : $($script:wiz.DataCompression)")
+        if ($script:wiz.SourceIsPartitioned)
+        {
+            $targetTableForSummary = if ($txt6TargetTable.Text.Trim()) { $txt6TargetTable.Text.Trim() } else { $script:wiz.TableName }
+            $lines.Add("Mode                 : COPY (new partitioning) -> '$($txt6TargetDb.Text.Trim()).$($script:wiz.SchemaName).$targetTableForSummary'")
+            if ($clb6CopyKey.Visible -and $clb6CopyKey.CheckedItems.Count -gt 0) { $lines.Add("Key Column           : $($clb6CopyKey.CheckedItems[0]) (explicit)") }
+            else { $lines.Add('Key Column           : (auto-derive from single-column clustered index/PK)') }
+            $lines.Add("Partitions           : $($script:wiz.Boundaries.Count + 1) ($($script:wiz.Boundaries.Count) boundary value(s))")
+            $lines.Add('                       Source table stays fully active and unchanged (no rename, no cutover).')
+            $txt7Summary.Text = $lines -join "`r`n"
+            return
+        }
         if ($chk6MigrateNow.Checked)
         {
             $lines.Add("Mode                 : Migrate to archive database NOW -> '$($txt6ArchiveDb.Text.Trim())'")
@@ -937,6 +1068,63 @@ ORDER BY ic.key_ordinal
     }
 
     $btn7Execute.Add_Click({
+        if ($script:wiz.SourceIsPartitioned)
+        {
+            if (-not $txt6TargetDb.Text.Trim())
+            {
+                [System.Windows.Forms.MessageBox]::Show("Please enter a Target Database name.", 'Missing input', 'OK', 'Warning') | Out-Null
+                return
+            }
+            if ($clb6CopyKey.Visible -and $clb6CopyKey.CheckedItems.Count -eq 0)
+            {
+                [System.Windows.Forms.MessageBox]::Show("Please check exactly one Key Column - this table has no single-column clustered index/PK that could be derived automatically.", 'Missing input', 'OK', 'Warning') | Out-Null
+                return
+            }
+
+            $targetTableName = if ($txt6TargetTable.Text.Trim()) { $txt6TargetTable.Text.Trim() } else { $script:wiz.TableName }
+            $confirm = [System.Windows.Forms.MessageBox]::Show("Copy '$($script:wiz.SchemaName).$($script:wiz.TableName)' as a NEW, independently partitioned table into '$($txt6TargetDb.Text.Trim())'?`n`nThe source table is NOT modified - it stays active under its current partitioning.", 'Confirm', 'YesNo', 'Warning')
+            if ($confirm -ne 'Yes') { return }
+
+            $btn7Execute.Enabled = $false
+            $btnBack.Enabled = $false
+            $cp = $script:connParams
+            Add-Log "Starting copy of '$($script:wiz.SchemaName).$($script:wiz.TableName)' -> '$($txt6TargetDb.Text.Trim()).$($script:wiz.SchemaName).$targetTableName' ..."
+            try
+            {
+                $copyParams = @{
+                    SqlInstance         = $script:wiz.SqlInstance
+                    Database            = $script:wiz.Database
+                    Schema              = $script:wiz.SchemaName
+                    Table               = $script:wiz.TableName
+                    TargetDatabaseName  = $txt6TargetDb.Text.Trim()
+                    TargetTableName     = $targetTableName
+                    PartitionColumn     = $script:wiz.PartitionColumn
+                    Granularity         = $script:wiz.Granularity
+                    BoundaryType        = $script:wiz.BoundaryType
+                    SurrogateDateFormat = $script:wiz.SurrogateDateFormat
+                    FilegroupStrategy   = $script:wiz.FilegroupStrategy
+                    FutureBufferPeriods = $script:wiz.FutureBufferPeriods
+                    DataCompression     = $script:wiz.DataCompression
+                    Confirm             = $false
+                    ErrorAction         = 'Stop'
+                    EnableException     = $true
+                }
+                if ($clb6CopyKey.Visible -and $clb6CopyKey.CheckedItems.Count -gt 0) { $copyParams['KeyColumn'] = [string]$clb6CopyKey.CheckedItems[0] }
+                $result = Copy-sqmPartitionedTable @cp @copyParams
+                Add-Log "Copy completed: $($result.RowsCopied) row(s) copied, $($result.RowsVerified) row(s) verified in target, status $($result.Status)."
+                Add-Log 'DONE.'
+                [System.Windows.Forms.MessageBox]::Show("'$($script:wiz.SchemaName).$($script:wiz.TableName)' was copied successfully to '$($txt6TargetDb.Text.Trim())'.", 'Success', 'OK', 'Information') | Out-Null
+            }
+            catch
+            {
+                Add-Log "ERROR: $($_.Exception.Message)"
+                [System.Windows.Forms.MessageBox]::Show("Error during copy:`n$($_.Exception.Message)", 'Error', 'OK', 'Error') | Out-Null
+                $btnBack.Enabled = $true
+                $btn7Execute.Enabled = $true
+            }
+            return
+        }
+
         $migrateNow = $chk6MigrateNow.Checked
         if ($migrateNow -and -not $txt6ArchiveDb.Text.Trim())
         {
@@ -1128,14 +1316,17 @@ ORDER BY ic.key_ordinal
             1 {
                 if ($grid1.SelectedRows.Count -eq 0) { Set-Status 'Please select a table.' 'Warn'; return $false }
                 $r = $grid1.SelectedRows[0]
-                if ($r.Cells['Status'].Value -eq 'already partitioned')
-                {
-                    Set-Status 'This table is already partitioned - please select another one.' 'Warn'; return $false
-                }
                 $script:wiz.SchemaName = $r.Cells['Schema'].Value
                 $script:wiz.TableName = $r.Cells['Tabelle'].Value
                 $script:wiz.IsHeap = ($r.Cells['Typ'].Value -eq 'Heap')
+                $script:wiz.SourceIsPartitioned = ($r.Cells['Status'].Value -eq 'already partitioned')
                 $script:step6KeyColumnChecked = $false
+                $script:step6CopyKeyColumnChecked = $false
+                Set-Step6Mode
+                if ($script:wiz.SourceIsPartitioned)
+                {
+                    Set-Status "'$($script:wiz.SchemaName).$($script:wiz.TableName)' is already partitioned - the wizard will offer to COPY it (new partitioning) to another database instead of converting it." 'Info'
+                }
                 Load-Step2
                 return $true
             }
