@@ -17,6 +17,9 @@ auf (Logging, Konfiguration, WinForms-Theme werden von sqmSQLTool wiederverwende
 - Automatisches Entfernen alter Partitionen nach konfigurierbarer Aufbewahrung
   (Monate/Jahre), optional mit Auslagerung in eine Archiv-Datenbank auf
   derselben Instanz — über einen zweiten SQL-Agent-Job.
+- Ad-hoc-Retention (`Invoke-sqmPartitionRetention`) — dieselbe Aufbewahrungslogik
+  sofort und fuer eine einzelne Tabelle ausloesen, ohne auf den Job zu warten
+  oder die Tabelle vorher zu registrieren.
 - Vollstaendige Migration einer aktiven Tabelle in eine separate Archiv-Datenbank
   (`Invoke-sqmTableArchiveMigration`) — monatsweise per MERGE, fortsetzbar, mit
   optionalem Cutover (Quelltabelle wird durch eine View auf die Archiv-Kopie

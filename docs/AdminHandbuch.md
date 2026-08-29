@@ -141,6 +141,26 @@ Setzt voraus, dass die Tabelle bereits partitioniert und registriert ist (Ablauf
 weiterhin aktiven, partitionierten Tabelle — nicht die gesamte Tabelle auf einmal. Fuer eine
 sofortige Komplettmigration der ganzen Tabelle siehe Ablaufplan C.
 
+### Ad-hoc statt Job: sofortige Retention fuer eine einzelne Tabelle
+
+`New-sqmPartitionRetentionJob` deckt den Dauerbetrieb ab (woechentlich, alle registrierten
+Tabellen). Fuer einen sofortigen, einmaligen Lauf — Test vor dem Einrichten des Jobs, eine
+Notfall-Bereinigung ("wir brauchen JETZT Platz"), oder eine Tabelle, die (noch) gar nicht
+registriert ist — gibt es `Invoke-sqmPartitionRetention`:
+
+```powershell
+Invoke-sqmPartitionRetention -SqlInstance "SQL01" -Database "Sales" -Schema "dbo" `
+    -Table "OrderHistory" -RetentionValue 120 -RetentionUnit Months
+```
+
+Entfernt sofort alle Partitionen aelter als der angegebene Cutoff (hier: 120 Monate = 10 Jahre),
+per derselben SWITCH-PARTITION-+-MERGE-RANGE-Logik wie oben (`Invoke-sqmPartitionArchive`
+dahinter), optional mit `-ArchiveDatabaseName` fuer eine Kopie vor dem Entfernen. Braucht **keine**
+vorherige Registrierung — die Grenzwerte jeder Partition werden direkt gelesen und ausgewertet.
+Eine einzige Bestaetigungsabfrage fuer den ganzen Lauf (zeigt vorab die Anzahl betroffener
+Partitionen), nicht eine pro Partition. `-WhatIf` zeigt, wie viele Partitionen betroffen waeren,
+ohne etwas zu aendern.
+
 ---
 
 ## 5. Ablaufplan C: Tabelle in eine Archiv-Datenbank migrieren

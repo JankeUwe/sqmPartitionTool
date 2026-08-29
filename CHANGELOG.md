@@ -1,5 +1,36 @@
 # sqmPartitionTool — Changelog
 
+## [1.10.0.0] — 2026-08-29
+
+### New: `Invoke-sqmPartitionRetention` — ad-hoc "remove everything older than X months/years" for one table
+
+`New-sqmPartitionRetentionJob`'s weekly sweep already applies `-RetentionValue`/`-RetentionUnit`
+from `sqm_PartitionRegistry` across every registered table, but only on its own schedule, and the
+per-table loop logic lived inline in the private job script - there was no way to run it on demand
+for one table with a value chosen right now (testing before enabling the job, an emergency
+"we need space now" cleanup, or a one-off table that isn't registered at all).
+
+`Invoke-sqmPartitionRetention -SqlInstance ... -Database ... -Schema ... -Table ... -RetentionValue
+120 -RetentionUnit Months` removes every partition whose data is older than the cutoff - repeatedly
+calling the existing, already-tested `Invoke-sqmPartitionArchive` (SWITCH PARTITION + optional
+`-ArchiveDatabaseName` + MERGE RANGE), oldest first, until nothing left is older than the cutoff.
+Removes the partition itself (boundary gone, partition count shrinks) - deliberately not SQL
+Server's `ALTER TABLE ... TRUNCATE PARTITION`, which only empties the data and leaves the boundary/
+partition slot in place; that would be a different, simpler but less complete operation and isn't
+what this module's existing retention mechanism does anywhere else.
+
+No registry dependency: the cutoff comparison reads each partition's boundary value directly by its
+.NET runtime type from `Get-sqmPartitionStatus` (a `[datetime]` compared directly; a string/int
+surrogate key parsed by digit length - 6 = `yyyyMM`, 8 = `yyyyMMdd`) instead of looking up
+`BoundaryType`/`SurrogateDateFormat` from `sqm_PartitionRegistry` - works on a table regardless of
+whether it's registered. One `ShouldProcess` confirmation for the whole run (with the pre-counted
+number of partitions about to be removed), not one per partition.
+
+Live-verified against DEV01 (5000 rows across 28 monthly partitions, 24 months of data,
+`-RetentionValue 12 -RetentionUnit Months`): correctly identified and removed exactly the 12
+partitions older than the cutoff (2289 rows), left the remaining 16 partitions untouched, `-WhatIf`
+correctly removed nothing, and a second run correctly reported nothing left to do.
+
 ## [1.9.1.0] — 2026-08-29
 
 ### Doc fix: `-ViewCutover` read-consistency claim, after live verification against DEV01
