@@ -48,6 +48,15 @@
       Laufzeit der Migration tolerieren oder anderweitig umleiten. Am Ende: View droppen, neue
       Tabelle auf den Originalnamen umbenennen (die jetzt leere "..._sqmPartOld" bleibt wie beim
       Nicht-View-Cutover-Fall bestehen).
+      Live gegen DEV01 verifiziert (60000 Zeilen, ~110s Laufzeit): COUNT(*) ueber die View blieb
+      durchgehend bei mindestens der vollen Zeilenzahl, ging NIE unter den vollstaendigen Bestand
+      zurueck - aber unter READ COMMITTED (Standard-Isolationsebene) kann ein einzelner gerade
+      committender Batch fuer den Moment einer laufenden SELECT-Abfrage DOPPELT auftauchen (im
+      Scan der alten Tabelle noch erfasst, im Scan der neuen Tabelle schon wieder), wenn der Batch
+      zwischen den beiden Teil-Scans derselben Abfrage committet. Beobachtet als kurzzeitig +1
+      Batch-Groesse in COUNT(*), nie ein Minus. Fuer exakte Zaehlungen waehrend der Migration
+      waere READ COMMITTED SNAPSHOT (falls auf der Datenbank aktiv) die Abhilfe - fuer normale
+      Lese-/Reporting-Zugriffe ist das transiente Duplikat i.d.R. unkritisch.
 
     Registriert die Tabelle danach in master.dbo.sqm_PartitionRegistry (Register-sqmPartitionTable),
     ausser -NoRegister ist gesetzt.

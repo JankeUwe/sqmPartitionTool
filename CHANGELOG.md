@@ -1,5 +1,18 @@
 # sqmPartitionTool — Changelog
 
+## [1.9.1.0] — 2026-08-29
+
+### Doc fix: `-ViewCutover` read-consistency claim, after live verification against DEV01
+
+v1.9.0.0's changelog entry claimed the bridge view gives a "complete, always-consistent dataset"
+throughout migration - live-tested against a 60,000-row table on DEV01 (~110s run), that's very
+slightly too strong. `COUNT(*)` through the view never dropped below the full row count (good -
+that's the property that actually matters), but occasionally read `+1 BatchSize` transiently: under
+`READ COMMITTED`, if a batch commits between the view's scan of the old table and its scan of the
+new table within the same `SELECT`, that batch's rows can be counted in both for the instant of that
+one query. Never missing rows, occasionally a momentary duplicate. Documented in the function's
+`.DESCRIPTION`/`-ViewCutover` help; no code change, no functional change from v1.9.0.0.
+
 ## [1.9.0.0] — 2026-08-29
 
 ### New: `Invoke-sqmTablePartitionConversion -Method BatchedSwap -ViewCutover` — read continuity during the whole migration
