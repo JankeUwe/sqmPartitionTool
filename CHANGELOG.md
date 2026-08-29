@@ -1,5 +1,35 @@
 # sqmPartitionTool — Changelog
 
+## [1.9.0.0] — 2026-08-29
+
+### New: `Invoke-sqmTablePartitionConversion -Method BatchedSwap -ViewCutover` — read continuity during the whole migration
+
+Prompted by comparing our approach against
+[db-berater.de's "Partition a big table with zero downtime"](https://www.db-berater.de/2026/08/partition-a-big-table-with-zero-downtime/),
+which we already matched closely (new partitioned table built in parallel, batched
+`DELETE ... OUTPUT ... INTO`, final rename swap) but with one real gap: `BatchedSwap` deleted rows
+straight out of the still-originally-named table for the whole (potentially hours-long) segment
+loop, so `SELECT`s against the table name mid-migration saw a shrinking subset of the data, not the
+full current dataset.
+
+`-ViewCutover` closes that gap. Immediately after the new empty partitioned table is created (a
+seconds-wide window, not the full migration), the original table is renamed to `..._sqmPartOld` and
+a `UNION ALL` view is created under the original name over `..._sqmPartOld` and the new table. From
+that point on, `SELECT`s against the original name see the complete, always-consistent dataset for
+the entire segment loop - including while a boundary period is mid-move and its rows are split
+across both tables (each batch's `DELETE ... OUTPUT ... INTO` is atomic, so a row is never in both
+or neither). At the end: view dropped, new table renamed into place, the now-empty
+`..._sqmPartOld` stays (same as the non-cutover path).
+
+Deliberately **read-only**: a plain `UNION ALL` view isn't natively writable, and true automatic
+`INSERT`/`UPDATE`/`DELETE` routing (SQL Server's "updatable partitioned view") needs disjoint
+CHECK-CONSTRAINT value ranges between the member tables - which doesn't hold here while a period is
+actively being migrated (its rows are on both sides for the duration). Building that with
+`INSTEAD OF` triggers was considered and deliberately deferred - real complexity and a real place to
+introduce a data-loss bug, for a codebase that would need thorough testing before being trusted
+against a real table. Writes against the table name fail while the view exists; only use
+`-ViewCutover` where write traffic can tolerate that for the migration's duration.
+
 ## [1.8.1.0] — 2026-08-27
 
 ### Fix: `Invoke-sqmTableRelocation -TargetSchemaName` created the schema in the SOURCE database, not the target

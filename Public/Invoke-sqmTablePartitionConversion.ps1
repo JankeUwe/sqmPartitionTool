@@ -30,6 +30,24 @@
       Abschliessend sp_rename-Swap (alte, jetzt leere Tabelle -> "..._sqmPartOld", neue Tabelle ->
       Originalname). V1-Einschraenkung: bricht mit Fehler ab, wenn die Tabelle eingehende
       Fremdschluessel oder Trigger hat (siehe -Method Default/NewTableSwap fuer diese Faelle).
+    - -Method BatchedSwap -ViewCutover: schliesst die Luecke, dass Leser waehrend des (bei sehr
+      grossen Tabellen ggf. stundenlangen) Segment-Loops einen unvollstaendigen Datenbestand sehen
+      wuerden. Direkt nach Anlage der neuen leeren Tabelle (~Sekunden statt Stunden Fenster): alte
+      Tabelle sofort nach "..._sqmPartOld" umbenennen und eine View unter dem Originalnamen
+      anlegen (UNION ALL aus "..._sqmPartOld" und der neuen Tabelle) - SELECT-Zugriffe auf den
+      Originalnamen sehen ab diesem Moment durchgehend den vollstaendigen, aktuellen Datenbestand,
+      auch waehrend ein Boundary-Segment gerade "in Bewegung" ist (dessen Zeilen zu diesem
+      Zeitpunkt auf beide Tabellen verteilt sind - siehe unten). Der Segment-Loop verschiebt danach
+      Zeilen aus "..._sqmPartOld" (nicht mehr aus dem Originalnamen - der ist jetzt die View).
+      Absichtlich NUR lesend: eine UNION-ALL-View ist in SQL Server nicht direkt schreibbar, und
+      echtes automatisches INSERT/UPDATE/DELETE-Routing (SQL Servers "updatable partitioned view")
+      setzt disjunkte CHECK-CONSTRAINT-Wertebereiche zwischen den Tabellen voraus - genau das ist
+      hier waehrend der Laufzeit eines einzelnen Segments nicht gegeben (dessen Zeilen sind fuer die
+      Dauer des Segments auf beide Tabellen verteilt). INSERT/UPDATE/DELETE gegen den Originalnamen
+      schlagen daher fehl, solange die View existiert - die Anwendung muss Schreibzugriffe fuer die
+      Laufzeit der Migration tolerieren oder anderweitig umleiten. Am Ende: View droppen, neue
+      Tabelle auf den Originalnamen umbenennen (die jetzt leere "..._sqmPartOld" bleibt wie beim
+      Nicht-View-Cutover-Fall bestehen).
 
     Registriert die Tabelle danach in master.dbo.sqm_PartitionRegistry (Register-sqmPartitionTable),
     ausser -NoRegister ist gesetzt.
@@ -79,6 +97,14 @@
 .PARAMETER BatchSize
     Nur -Method BatchedSwap: Zeilen pro Kopier-/Loeschbatch *innerhalb* eines Boundary-Segments.
     Standard: 50000.
+.PARAMETER ViewCutover
+    Nur -Method BatchedSwap: sofort nach Anlage der neuen leeren Tabelle wird die alte Tabelle nach
+    "..._sqmPartOld" umbenannt und eine (schreibgeschuetzte) UNION-ALL-View unter dem Originalnamen
+    angelegt, statt erst am Ende umzubenennen. SELECT-Zugriffe auf den Originalnamen sehen dadurch
+    waehrend der gesamten (bei grossen Tabellen ggf. stundenlangen) Segment-Migration durchgehend
+    den vollstaendigen Datenbestand, nicht nur eine schrumpfende Teilmenge. INSERT/UPDATE/DELETE
+    gegen den Originalnamen schlagen waehrenddessen fehl (siehe DESCRIPTION) - nur fuer Tabellen
+    geeignet, deren Schreibzugriffe die Migrationsdauer ueber tolerieren koennen.
 .PARAMETER DataCompression
     None (Standard), Row oder Page. Wird bei allen drei -Method-Varianten direkt nach dem
     Umstellen auf das Partition Scheme angewendet (ALTER TABLE ... REBUILD PARTITION = ALL WITH
@@ -174,6 +200,9 @@ function Invoke-sqmTablePartitionConversion
 		[int]$BatchSize = 50000,
 
 		[Parameter(Mandatory = $false)]
+		[switch]$ViewCutover,
+
+		[Parameter(Mandatory = $false)]
 		[ValidateSet('None', 'Row', 'Page')]
 		[string]$DataCompression = 'None',
 
@@ -222,6 +251,13 @@ function Invoke-sqmTablePartitionConversion
 			throw $msg
 		}
 		foreach ($w in $readiness.Warnings) { Invoke-sqmLogging -Message "Warnung: $w" -FunctionName $functionName -Level "WARNING" }
+
+		if ($ViewCutover -and $Method -ne 'BatchedSwap')
+		{
+			$msg = "-ViewCutover ist nur mit -Method BatchedSwap sinnvoll (Default/NewTableSwap haben kein langlaufendes Segment-Fenster, das eine Bridge-View braucht)."
+			Invoke-sqmLogging -Message $msg -FunctionName $functionName -Level "ERROR"
+			throw $msg
+		}
 
 		# -Method BatchedSwap baut eine NEUE Tabelle auf und benennt sie an die Stelle der alten -
 		# eingehende Fremdschluessel/Trigger werden dabei NICHT automatisch mituebernommen (V1-
@@ -465,6 +501,23 @@ WHERE p.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND p.index_id IN (0, 1);
 			$colListSql = ($tableDef.ColumnNames | ForEach-Object { "[$_]" }) -join ', '
 			$colListDeleted = ($tableDef.ColumnNames | ForEach-Object { "DELETED.[$_]" }) -join ', '
 
+			# -ViewCutover: statt erst am ENDE umzubenennen, jetzt sofort (kurzes Fenster) umbenennen
+			# und eine schreibgeschuetzte Bridge-View unter dem Originalnamen anlegen, damit Leser
+			# waehrend des ganzen (potenziell stundenlangen) Segment-Loops den vollstaendigen
+			# Datenbestand sehen statt einer schrumpfenden Teilmenge. Der Loop verschiebt danach aus
+			# der umbenannten Tabelle, nicht mehr aus dem Originalnamen (der ist jetzt die View).
+			# Bereits ueber das ShouldProcess weiter oben (vor Beginn des BatchedSwap-Blocks) bestaetigt -
+			# hier kein zweiter ShouldProcess-Aufruf, sonst doppelte Confirm-Rueckfrage bei -Confirm.
+			$deleteSourceTable = $Table
+			if ($ViewCutover)
+			{
+				Invoke-DbaQuery @connParams -Query "EXEC sp_rename N'[$Schema].[$Table]', N'${Table}_sqmPartOld';" -ErrorAction Stop -EnableException
+				$viewDdl = "CREATE VIEW [$Schema].[$Table] AS SELECT $colListSql FROM [$Schema].[${Table}_sqmPartOld] UNION ALL SELECT $colListSql FROM [$Schema].[$swapTable];"
+				Invoke-DbaQuery @connParams -Query $viewDdl -ErrorAction Stop -EnableException
+				Invoke-sqmLogging -Message "ViewCutover: '$Schema.$Table' ist jetzt eine schreibgeschuetzte UNION-ALL-View ueber '${Table}_sqmPartOld' und '$swapTable'. SELECT sieht ab jetzt durchgehend den vollstaendigen Datenbestand; INSERT/UPDATE/DELETE gegen diesen Namen schlagen fehl, bis die Migration abgeschlossen ist." -FunctionName $functionName -Level "WARNING"
+				$deleteSourceTable = "${Table}_sqmPartOld"
+			}
+
 			$totalMoved = 0
 			$segmentsDone = 0
 			foreach ($seg in $segmentBounds)
@@ -478,7 +531,7 @@ WHERE p.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND p.index_id IN (0, 1);
 				$rowsAffected = 1
 				while ($rowsAffected -gt 0)
 				{
-					$moveBody = "DELETE TOP ($BatchSize) FROM [$Schema].[$Table] OUTPUT $colListDeleted INTO [$Schema].[$swapTable] ($colListSql) $whereClause; SELECT @@ROWCOUNT AS Cnt;"
+					$moveBody = "DELETE TOP ($BatchSize) FROM [$Schema].[$deleteSourceTable] OUTPUT $colListDeleted INTO [$Schema].[$swapTable] ($colListSql) $whereClause; SELECT @@ROWCOUNT AS Cnt;"
 					$moveSql = if ($tableDef.HasIdentity)
 					{
 						"SET IDENTITY_INSERT [$Schema].[$swapTable] ON; $moveBody SET IDENTITY_INSERT [$Schema].[$swapTable] OFF;"
@@ -516,13 +569,24 @@ WHERE p.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND p.index_id IN (0, 1);
 				}
 			}
 
-			Invoke-sqmLogging -Message "Alle Segmente verschoben ($totalMoved Zeile(n) insgesamt) - '$Schema.$Table' ist jetzt leer." -FunctionName $functionName -Level "INFO"
+			Invoke-sqmLogging -Message "Alle Segmente verschoben ($totalMoved Zeile(n) insgesamt) - '$deleteSourceTable' ist jetzt leer." -FunctionName $functionName -Level "INFO"
 
-			# Swap: alte (jetzt leere) Tabelle beiseite, neue an ihre Stelle - analog -Method
-			# NewTableSwap (Original bleibt als "..._sqmPartOld" erhalten, kein automatisches Drop).
-			Invoke-DbaQuery @connParams -Query "EXEC sp_rename N'[$Schema].[$Table]', N'${Table}_sqmPartOld';" -ErrorAction Stop -EnableException
-			Invoke-DbaQuery @connParams -Query "EXEC sp_rename N'[$Schema].[$swapTable]', N'$Table';" -ErrorAction Stop -EnableException
-			Invoke-sqmLogging -Message "$applyAction - erfolgreich (BatchedSwap: '$Schema.$Table' -> '${Table}_sqmPartOld' [leer], '$swapTable' -> '$Schema.$Table')." -FunctionName $functionName -Level "INFO"
+			if ($ViewCutover)
+			{
+				# Alte Tabelle heisst bereits "..._sqmPartOld" (Cutover oben) - nur die View droppen
+				# und die neue Tabelle auf den Originalnamen umbenennen.
+				Invoke-DbaQuery @connParams -Query "DROP VIEW [$Schema].[$Table];" -ErrorAction Stop -EnableException
+				Invoke-DbaQuery @connParams -Query "EXEC sp_rename N'[$Schema].[$swapTable]', N'$Table';" -ErrorAction Stop -EnableException
+				Invoke-sqmLogging -Message "$applyAction - erfolgreich (BatchedSwap+ViewCutover: Bridge-View gedroppt, '$swapTable' -> '$Schema.$Table'; '${Table}_sqmPartOld' [leer] bleibt erhalten)." -FunctionName $functionName -Level "INFO"
+			}
+			else
+			{
+				# Swap: alte (jetzt leere) Tabelle beiseite, neue an ihre Stelle - analog -Method
+				# NewTableSwap (Original bleibt als "..._sqmPartOld" erhalten, kein automatisches Drop).
+				Invoke-DbaQuery @connParams -Query "EXEC sp_rename N'[$Schema].[$Table]', N'${Table}_sqmPartOld';" -ErrorAction Stop -EnableException
+				Invoke-DbaQuery @connParams -Query "EXEC sp_rename N'[$Schema].[$swapTable]', N'$Table';" -ErrorAction Stop -EnableException
+				Invoke-sqmLogging -Message "$applyAction - erfolgreich (BatchedSwap: '$Schema.$Table' -> '${Table}_sqmPartOld' [leer], '$swapTable' -> '$Schema.$Table')." -FunctionName $functionName -Level "INFO"
+			}
 		}
 		else
 		{
@@ -648,6 +712,7 @@ CREATE CLUSTERED INDEX [IX_${Table}_$PartitionColumn]
 			FilegroupStrategy     = $FilegroupStrategy
 			Status                = 'Success'
 			Registered            = $registered
+			ViewCutoverUsed       = [bool]$ViewCutover
 		}
 	}
 	catch
