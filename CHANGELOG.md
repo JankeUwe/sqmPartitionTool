@@ -1,5 +1,12 @@
 ﻿# sqmPartitionTool — Changelog
 
+## [1.12.1.0] — 2026-09-28
+
+### GUI: module version and load path in the window title
+
+The title now reads "sqmPartitionTool <version> - Partitioning Wizard | <module folder> | ...",
+so it is visible at a glance which installed copy is actually running.
+
 ## [1.12.0.0] — 2026-09-28
 
 ### GUI: "Finish" no longer closes silently

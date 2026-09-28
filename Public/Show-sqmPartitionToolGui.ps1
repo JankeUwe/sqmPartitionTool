@@ -157,7 +157,10 @@
 
     # ----- Hauptfenster ------------------------------------------------------------------
     $form = New-Object System.Windows.Forms.Form
-    $form.Text          = 'sqmPartitionTool - Partitioning Wizard | powershelldba.de'
+    # Version und Ladepfad im Titel: bei mehreren installierten Staenden ist sonst nicht
+    # erkennbar, welcher Code gerade laeuft.
+    $ptModule = $MyInvocation.MyCommand.Module
+    $form.Text          = "sqmPartitionTool $(if ($ptModule) { $ptModule.Version }) - Partitioning Wizard | $(if ($ptModule) { $ptModule.ModuleBase }) | powershelldba.de"
     $form.Size          = New-Object System.Drawing.Size(980, 720)
     $form.MinimumSize   = New-Object System.Drawing.Size(780, 560)
     $form.StartPosition = 'CenterScreen'
