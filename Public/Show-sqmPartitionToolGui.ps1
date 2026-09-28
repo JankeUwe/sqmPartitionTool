@@ -713,7 +713,7 @@
     # komplett ausgeblendet statt ein ungenutztes Feld anzuzeigen. Auswahl per CheckedListBox
     # (tatsaechliche Spalten der Tabelle) statt Freitext - kein Tippfehlerrisiko bei Spaltennamen.
     $lbl6Key = New-Object System.Windows.Forms.Label
-    $lbl6Key.Text = 'Key Column(s) (no usable clustered key - check ALL columns of a unique key, max. 4):'
+    $lbl6Key.Text = 'Key Column(s) (no usable clustered key - check ALL columns of a unique key, max. 5):'
     $lbl6Key.Location = New-Object System.Drawing.Point(24, 40)
     $lbl6Key.AutoSize = $true
     $lbl6Key.ForeColor = $cDim
@@ -724,7 +724,7 @@
     $clb6Key.ForeColor = $cText
     $clb6Key.CheckOnClick = $true
     $toolTip6Key = New-Object System.Windows.Forms.ToolTip
-    $toolTip6Key.SetToolTip($clb6Key, 'Check the column(s) that together uniquely identify a row (up to 4). Only shown because this table has no single clustered index/PK that could be used automatically.')
+    $toolTip6Key.SetToolTip($clb6Key, 'Check the column(s) that together uniquely identify a row (up to 5). Only shown because this table has no single clustered index/PK that could be used automatically.')
 
     $chk6Retention = New-Object System.Windows.Forms.CheckBox
     $chk6Retention.Text = 'Set up automatic maintenance (sliding-window extension + retention)'
@@ -833,6 +833,18 @@
     $toolTip6CopyKey = New-Object System.Windows.Forms.ToolTip
     $toolTip6CopyKey.SetToolTip($clb6CopyKey, 'Check exactly ONE column that uniquely identifies a row on its own (used for resumable batch copying, not for the new partitioning itself). Only shown because this table has no single-column clustered index/PK.')
 
+    # Nur bei In-place-Umwandlung eines Heaps, der einen geeigneten eindeutigen Nonclustered Index
+    # hat (Test-Step6PkCandidate): daraus wird der Clustered PK auf dem Partition Scheme statt eines
+    # neuen, nicht eindeutigen Index auf der Partitionsspalte. Bewusst NICHT vorausgewaehlt - es ist
+    # eine Schemaaenderung, auch wenn sich die Eindeutigkeit dadurch nicht aendert.
+    $chk6Pk = New-Object System.Windows.Forms.CheckBox
+    $chk6Pk.Location = New-Object System.Drawing.Point(4, 184)
+    $chk6Pk.AutoSize = $true
+    $chk6Pk.ForeColor = $cText
+    $toolTip6Pk = New-Object System.Windows.Forms.ToolTip
+    $toolTip6Pk.SetToolTip($chk6Pk, 'The table is a heap. Instead of adding a new non-unique clustered index on the partition column, the existing unique index becomes the clustered PRIMARY KEY (same columns, same uniqueness) directly on the partition scheme, and the then redundant index is dropped. The table is rewritten only once.')
+    $p6.Controls.Add($chk6Pk)
+
     $p6.Controls.Add($chk6MigrateNow)
     $p6.Controls.Add($lbl6Key); $p6.Controls.Add($clb6Key)
     $p6.Controls.Add($chk6Retention)
@@ -867,7 +879,7 @@ WHERE i.object_id = OBJECT_ID(N'[$($script:wiz.SchemaName)].[$($script:wiz.Table
 ORDER BY ic.key_ordinal
 "@
             $keyRows = @(Invoke-DbaQuery @cp -SqlInstance $script:wiz.SqlInstance -Database $script:wiz.Database -Query $keyQuery -ErrorAction Stop)
-            $script:step6KeyColumnNeeded = ($keyRows.Count -eq 0 -or $keyRows.Count -gt 4)
+            $script:step6KeyColumnNeeded = ($keyRows.Count -eq 0 -or $keyRows.Count -gt 5)
 
             if ($script:step6KeyColumnNeeded)
             {
@@ -920,6 +932,53 @@ ORDER BY ic.key_ordinal
         catch { $script:step6CopyKeyColumnNeeded = $true }
     }
 
+    # Sucht (einmalig pro Tabelle + Partitionsspalte) einen eindeutigen Nonclustered Index, der sich
+    # als Clustered PK eignet - dieselben Bedingungen, die Invoke-sqmTablePartitionConversion
+    # -PrimaryKeyFromUniqueIndex vor jeder Aenderung prueft. Bei mehreren gewinnt der schmalste.
+    $script:step6PkCandidate = $null
+    $script:step6PkChecked = $false
+    function Test-Step6PkCandidate
+    {
+        if ($script:step6PkChecked) { return }
+        $script:step6PkChecked = $true
+        $script:step6PkCandidate = $null
+        if (-not $script:wiz.IsHeap -or -not $script:wiz.PartitionColumn) { return }
+        try
+        {
+            $cp = $script:connParams
+            $obj = "N'[$($script:wiz.SchemaName)].[$($script:wiz.TableName)]'"
+            $pcol = $script:wiz.PartitionColumn -replace "'", "''"
+            $pkQuery = @"
+SELECT TOP 1 i.name AS IndexName,
+       (SELECT STRING_AGG(c.name, ', ') WITHIN GROUP (ORDER BY ic.key_ordinal)
+        FROM sys.index_columns ic JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+        WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.key_ordinal > 0) AS KeyColumns,
+       (SELECT COUNT(*) FROM sys.index_columns ic WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.key_ordinal > 0) AS KeyCount
+FROM sys.indexes i
+WHERE i.object_id = OBJECT_ID($obj) AND i.type = 2 AND i.is_unique = 1 AND i.has_filter = 0
+  AND NOT EXISTS (SELECT 1 FROM sys.indexes x WHERE x.object_id = i.object_id AND x.index_id = 1)
+  AND NOT EXISTS (SELECT 1 FROM sys.key_constraints k WHERE k.parent_object_id = i.object_id AND k.type = 'PK')
+  AND EXISTS (SELECT 1 FROM sys.index_columns ic JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+              WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.key_ordinal > 0 AND c.name = N'$pcol')
+  AND NOT EXISTS (SELECT 1 FROM sys.index_columns ic JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+                  WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.key_ordinal > 0 AND c.is_nullable = 1)
+  AND NOT EXISTS (SELECT 1 FROM sys.foreign_keys fk WHERE fk.referenced_object_id = i.object_id AND fk.key_index_id = i.index_id)
+ORDER BY KeyCount, i.index_id
+"@
+            $row = @(Invoke-DbaQuery @cp -SqlInstance $script:wiz.SqlInstance -Database $script:wiz.Database -Query $pkQuery -ErrorAction Stop -EnableException)
+            if ($row.Count -gt 0)
+            {
+                $script:step6PkCandidate = [PSCustomObject]@{ IndexName = [string]$row[0].IndexName; KeyColumns = [string]$row[0].KeyColumns }
+                $chk6Pk.Text = "Make unique index '$($row[0].IndexName)' ($($row[0].KeyColumns)) the clustered PRIMARY KEY"
+            }
+        }
+        catch { $script:step6PkCandidate = $null }
+    }
+    function Test-Step6PkActive
+    {
+        (-not $script:wiz.SourceIsPartitioned) -and (-not $chk6MigrateNow.Checked) -and $script:step6PkCandidate -and $chk6Pk.Checked
+    }
+
     # Ob die jeweilige Schluesselliste gilt, NICHT ueber .Visible abfragen: WinForms liefert fuer
     # .Visible $false, sobald ein uebergeordnetes Panel ausgeblendet ist - beim Klick auf Execute
     # (Schritt 7) ist das Panel von Schritt 6 immer ausgeblendet, die Auswahl wurde dadurch
@@ -946,6 +1005,9 @@ ORDER BY ic.key_ordinal
         if ($copyMode) { Test-Step6CopyKeyColumnNeed }
         $showCopyKey = $copyMode -and $script:step6CopyKeyColumnNeeded
         $lbl6CopyKey.Visible = $showCopyKey; $clb6CopyKey.Visible = $showCopyKey
+
+        if (-not $copyMode) { Test-Step6PkCandidate }
+        $chk6Pk.Visible = (-not $copyMode) -and (-not $migrateNow) -and [bool]$script:step6PkCandidate
 
         if ($copyMode)
         {
@@ -1069,6 +1131,14 @@ ORDER BY ic.key_ordinal
         else
         {
             $lines.Add("Partitions           : $($script:wiz.Boundaries.Count + 1) ($($script:wiz.Boundaries.Count) boundary value(s))")
+            if (Test-Step6PkActive)
+            {
+                $lines.Add("Primary Key          : '$($script:step6PkCandidate.IndexName)' ($($script:step6PkCandidate.KeyColumns)) becomes PK_$($script:wiz.TableName), CLUSTERED on the partition scheme")
+            }
+            elseif ($script:wiz.IsHeap)
+            {
+                $lines.Add("Clustered Index      : new non-unique index on $($script:wiz.PartitionColumn) (heap)")
+            }
             if ($chk6Retention.Checked)
             {
                 $lines.Add("Automated Maintenance: Yes - Retention $($num6Retention.Value) $($cmb6Unit.SelectedItem)")
@@ -1187,13 +1257,13 @@ ORDER BY ic.key_ordinal
                 }
                 if ($script:wiz.BoundaryType) { $archParams['BoundaryType'] = $script:wiz.BoundaryType; $archParams['SurrogateDateFormat'] = $script:wiz.SurrogateDateFormat }
                 $keyCount = $clb6Key.CheckedItems.Count
-                if ((Test-Step6KeyListActive) -and $keyCount -ge 1 -and $keyCount -le 4)
+                if ((Test-Step6KeyListActive) -and $keyCount -ge 1 -and $keyCount -le 5)
                 {
                     $archParams['KeyColumn'] = @($clb6Key.CheckedItems | ForEach-Object { $_ })
                 }
                 elseif (Test-Step6KeyListActive)
                 {
-                    [System.Windows.Forms.MessageBox]::Show("Please check 1 to 4 Key Columns (checked: $keyCount) - together they must identify a row uniquely. This table has no clustered key that could be derived automatically.", 'Key Column', 'OK', 'Warning') | Out-Null
+                    [System.Windows.Forms.MessageBox]::Show("Please check 1 to 5 Key Columns (checked: $keyCount) - together they must identify a row uniquely. This table has no clustered key that could be derived automatically.", 'Key Column', 'OK', 'Warning') | Out-Null
                     $btn7Execute.Enabled = $true
                     $btnBack.Enabled = $true
                     return
@@ -1247,8 +1317,14 @@ ORDER BY ic.key_ordinal
                 $convParams['ManualStartValue'] = $txt3Start.Text.Trim()
                 if ($txt3End.Text.Trim()) { $convParams['ManualEndValue'] = $txt3End.Text.Trim() }
             }
+            if (Test-Step6PkActive) { $convParams['PrimaryKeyFromUniqueIndex'] = $script:step6PkCandidate.IndexName }
             $result = Invoke-sqmTablePartitionConversion @cp @convParams
             Add-Log "Conversion completed: $($result.PartitionCount) partition(s), status $($result.Status)."
+            if ($result.PrimaryKeyCreated) { Add-Log "Primary key '$($result.PrimaryKeyCreated)' created (clustered, on the partition scheme)." }
+            if (@($result.NonAlignedIndexes).Count -gt 0)
+            {
+                Add-Log "WARNING: index(es) not aligned to the partition scheme: $($result.NonAlignedIndexes -join ', '). They block SWITCH PARTITION (archiving/retention) - rebuild them on the scheme or drop them if redundant."
+            }
 
             if ($chk6Retention.Checked)
             {
@@ -1352,6 +1428,10 @@ ORDER BY ic.key_ordinal
                 if ($r.Cells['Kompatibel'].Value -ne 'Yes') { Set-Status 'This data type is not allowed for partition functions.' 'Warn'; return $false }
                 $script:wiz.PartitionColumn = $r.Cells['Spalte'].Value
                 $script:wiz.DataType = $r.Cells['Typ'].Value
+                # PK-Kandidat haengt von der Partitionsspalte ab - jetzt erst bestimmbar
+                $script:step6PkChecked = $false
+                $chk6Pk.Checked = $false
+                Set-Step6Mode
                 Load-Step3
                 return $true
             }

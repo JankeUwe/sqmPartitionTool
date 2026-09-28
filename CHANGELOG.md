@@ -1,5 +1,49 @@
 ﻿# sqmPartitionTool — Changelog
 
+## [1.11.0.0] — 2026-09-28
+
+### New: `-PrimaryKeyFromUniqueIndex` — turn a heap's unique index into the clustered PK on the partition scheme
+
+For a heap, `Invoke-sqmTablePartitionConversion` so far added a new, non-unique clustered index on
+the partition column only. A heap that already has a unique nonclustered key (e.g.
+`CORO_DB.dbo.CARCHIVE` with `IX_Carchive` on `VTDAT, VMTG, VID1, VID2, VSEQ`) ended up with that
+unique index next to the new clustered one. `-PrimaryKeyFromUniqueIndex <name>` instead creates
+`PRIMARY KEY CLUSTERED` with exactly the same key columns and order directly on the partition
+scheme and drops the then redundant index, rewriting the table only once. Uniqueness semantics do
+not change.
+
+All preconditions are checked before any filegroup, partition function or scheme is created:
+heap, no existing PK, index unique/unfiltered/nonclustered, all key columns NOT NULL, partition
+column part of the key, no foreign key referencing that exact index, PK name free
+(`-PrimaryKeyName`, default `PK_<table>`). Offline the old index is dropped first inside one
+transaction (so it is not rebuilt for nothing); with `-Online` the PK is created first so
+uniqueness is enforced throughout.
+
+The GUI offers this as an opt-in checkbox in step 6 when the selected table is a heap and such an
+index exists for the chosen partition column (re-evaluated after step 2).
+
+### Non-aligned indexes are reported after every conversion
+
+Nonclustered indexes stay on their filegroup when a table is converted. They block
+`SWITCH PARTITION`, so `Invoke-sqmPartitionArchive` and retention refuse to run later. The
+conversion now checks alignment afterwards, logs a warning naming the indexes and returns them in
+`NonAlignedIndexes` (GUI: shown in the log). They are not rebuilt automatically: filters, INCLUDE
+columns and unique indexes without the partition column need a deliberate decision.
+
+### Composite keys with up to 5 columns (was 4)
+
+`Invoke-sqmTableArchiveMigration -KeyColumn`, `sqm_ArchiveMonthBatch` and the GUI now accept 5 key
+columns. `sqm_ArchiveMonthLog` gets `LastKeyProcessed5`, added idempotently to existing
+installations on the next run. Reason, verified on DEV01 with CARCHIVE-shaped test data: the
+4-column tuple `VMTG, VID1, VID2, VSEQ` repeats on different days within a month, so the MERGE
+failed with "attempted to update the same row more than once" from the second month on (600 of
+900 rows missing). With `VTDAT` as fifth column all 900 rows were archived.
+
+### Fix: conversion errors could be reported as success
+
+The final DDL of `-Method Default`/`NewTableSwap` ran through `Invoke-DbaQuery` without
+`-EnableException`; a SQL error was swallowed and the step logged as successful.
+
 ## [1.10.1.0] — 2026-09-28
 
 ### Fix: GUI ignored the checked Key Column(s) when executing

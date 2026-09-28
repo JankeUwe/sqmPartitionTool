@@ -66,11 +66,11 @@
     Neben echten DATE/DATETIME-Typen wird auch ein YYYYMMDD-Ganzzahl- oder String-Surrogat
     unterstuetzt (z.B. INT-Spalte mit Wert 20240115) - siehe -BoundaryType.
 .PARAMETER KeyColumn
-    Eine oder mehrere Spalten (in dieser Reihenfolge, max. 4) fuer den MERGE-Abgleich und die
+    Eine oder mehrere Spalten (in dieser Reihenfolge, max. 5) fuer den MERGE-Abgleich und die
     Keyset-Pagination - muessen als TUPEL eindeutig sein. Zusammengesetzte Schluessel sind erlaubt,
     z.B. -KeyColumn 'VMTG', 'VID1', 'VID2', 'VSEQ'. Ohne Angabe wird automatisch die vollstaendige
     Schluesselspalten-Liste (in key_ordinal-Reihenfolge) des Clustered Index/PK verwendet - Pflicht
-    nur bei einem echten Heap (kein Clustered Index) oder mehr als 4 Schluesselspalten.
+    nur bei einem echten Heap (kein Clustered Index) oder mehr als 5 Schluesselspalten.
 .PARAMETER Granularity
     Aktuell nur 'Month' unterstuetzt (YYYYMM-basierte Migration).
 .PARAMETER BatchSize
@@ -189,7 +189,7 @@ function Invoke-sqmTableArchiveMigration
 		[string]$DateColumn,
 
 		[Parameter(Mandatory = $false)]
-		[ValidateCount(1, 4)]
+		[ValidateCount(1, 5)]
 		[string[]]$KeyColumn,
 
 		[Parameter(Mandatory = $false)]
@@ -356,12 +356,12 @@ ORDER BY ic.key_ordinal
 			# @(...) erzwingt Array-Kontext - siehe gleicher Kommentar in Invoke-sqmTableRelocation.
 			$ciKeyRows = @(Invoke-DbaQuery @connParams -Database $Database -Query $ciKeyQuery -ErrorAction Stop -EnableException -As PSObject)
 			if ($ciKeyRows.Count -eq 0) { throw "'-KeyColumn' ist Pflicht: '$Schema.$Table' ist ein Heap (kein Clustered Index/PK, aus dem ein Schluessel automatisch abgeleitet werden koennte)." }
-			if ($ciKeyRows.Count -gt 4) { throw "'$Schema.$Table' hat einen zusammengesetzten Schluessel mit $($ciKeyRows.Count) Spalten - aktuell werden maximal 4 Schluesselspalten unterstuetzt. '-KeyColumn' muss eine eigene, hoechstens 4-spaltige eindeutige Schluesselliste explizit angeben." }
+			if ($ciKeyRows.Count -gt 5) { throw "'$Schema.$Table' hat einen zusammengesetzten Schluessel mit $($ciKeyRows.Count) Spalten - aktuell werden maximal 5 Schluesselspalten unterstuetzt. '-KeyColumn' muss eine eigene, hoechstens 5-spaltige eindeutige Schluesselliste explizit angeben." }
 			$KeyColumn = @($ciKeyRows | ForEach-Object { $_.ColumnName })
 		}
-		elseif (@($KeyColumn).Count -gt 4)
+		elseif (@($KeyColumn).Count -gt 5)
 		{
-			throw "'-KeyColumn' unterstuetzt aktuell maximal 4 Spalten (erhalten: $(@($KeyColumn).Count))."
+			throw "'-KeyColumn' unterstuetzt aktuell maximal 5 Spalten (erhalten: $(@($KeyColumn).Count))."
 		}
 		$keyColumnsCsv = ($KeyColumn -join ',')
 		Invoke-sqmLogging -Message "Schluessel fuer '$Schema.$Table': $keyColumnsCsv$(if (@($KeyColumn).Count -gt 1) { ' (zusammengesetzt)' })." -FunctionName $functionName -Level "INFO"

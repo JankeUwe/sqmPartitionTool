@@ -20,6 +20,14 @@
     - Heap (kein Clustered Index): -Method Default legt einen neuen Clustered Index direkt auf
       dem Partition Scheme an; -Method NewTableSwap fuer sehr grosse Heaps (Tabellenkopie +
       Umbenennung).
+    - Heap mit -PrimaryKeyFromUniqueIndex: statt eines neuen, nicht eindeutigen Index auf der
+      Partitionsspalte wird aus einem vorhandenen eindeutigen Nonclustered Index ein
+      PRIMARY KEY CLUSTERED mit denselben Spalten direkt auf dem Partition Scheme; der dann
+      doppelte Index wird entfernt. Die Tabelle wird dabei nur EINMAL neu geschrieben.
+
+    Nach dem Umstellen wird geprueft, ob alle Nonclustered-Indizes partitionsausgerichtet sind.
+    Nicht ausgerichtete Indizes bleiben unveraendert, werden aber als Warnung gemeldet: sie
+    verhindern SWITCH PARTITION und damit Invoke-sqmPartitionArchive/Retention.
     - -Method BatchedSwap (Heap UND indizierte/PK-Tabellen): fuer sehr grosse Tabellen auf
       SAN/Datentraeger mit wenig freiem Platz. Legt eine neue, leere partitionierte Kopie an und
       verschiebt die Daten SEGMENTWEISE (je Boundary-Periode, weiter unterteilt in -BatchSize)
@@ -96,6 +104,15 @@
 .PARAMETER AllowKeyChange
     Bestaetigt explizit, dass ein PRIMARY KEY/UNIQUE-Constraint um die Partitionsspalte erweitert
     werden darf (Pflicht, wenn Test-sqmPartitionReadiness das verlangt - siehe Warnungen dort).
+.PARAMETER PrimaryKeyFromUniqueIndex
+    Nur fuer Heaps mit -Method Default: Name eines vorhandenen eindeutigen Nonclustered Index
+    (oder UNIQUE-Constraints), aus dem ein PRIMARY KEY CLUSTERED mit denselben Schluesselspalten
+    in derselben Reihenfolge auf dem Partition Scheme wird. Voraussetzungen, alle VOR jeder
+    Aenderung geprueft: Index eindeutig und ungefiltert, alle Schluesselspalten NOT NULL,
+    Partitionsspalte im Schluessel, kein vorhandener PK, kein Fremdschluessel, der auf genau
+    diesen Index verweist. Die Eindeutigkeits-Semantik aendert sich nicht (dieselben Spalten).
+.PARAMETER PrimaryKeyName
+    Name des neuen Primary Keys. Standard: PK_<Tabelle>.
 .PARAMETER Method
     Default (Standard), NewTableSwap (fuer sehr grosse Heaps - Tabellenkopie statt Online-
     Index-Aufbau) oder BatchedSwap (fuer sehr grosse Tabellen mit wenig freiem Speicherplatz -
@@ -144,6 +161,13 @@
     Invoke-sqmTablePartitionConversion -SqlInstance "SQL01" -Database "Sales" -Schema "dbo" `
         -Table "OrderHistory" -PartitionColumn "OrderDate" -Granularity Quarter `
         -FilegroupStrategy PerPeriod -AllowKeyChange -Online
+
+.EXAMPLE
+    # Heap mit eindeutigem Nonclustered Index (VTDAT,VMTG,VID1,VID2,VSEQ): daraus wird der
+    # Clustered PK auf dem Partition Scheme, in einem Durchgang
+    Invoke-sqmTablePartitionConversion -SqlInstance "SQL01" -Database "CORO_DB" -Schema "dbo" `
+        -Table "CARCHIVE" -PartitionColumn "VTDAT" -Granularity Month -BoundaryType Int `
+        -PrimaryKeyFromUniqueIndex "IX_Carchive"
 
 .NOTES
     Benoetigt: dbatools, Invoke-sqmLogging (sqmSQLTool), alle uebrigen sqmPartitionTool-Core-
@@ -196,6 +220,12 @@ function Invoke-sqmTablePartitionConversion
 
 		[Parameter(Mandatory = $false)]
 		[switch]$AllowKeyChange,
+
+		[Parameter(Mandatory = $false)]
+		[string]$PrimaryKeyFromUniqueIndex,
+
+		[Parameter(Mandatory = $false)]
+		[string]$PrimaryKeyName,
 
 		[Parameter(Mandatory = $false)]
 		[ValidateSet('Default', 'NewTableSwap', 'BatchedSwap')]
@@ -266,6 +296,67 @@ function Invoke-sqmTablePartitionConversion
 			$msg = "-ViewCutover ist nur mit -Method BatchedSwap sinnvoll (Default/NewTableSwap haben kein langlaufendes Segment-Fenster, das eine Bridge-View braucht)."
 			Invoke-sqmLogging -Message $msg -FunctionName $functionName -Level "ERROR"
 			throw $msg
+		}
+
+		# -PrimaryKeyFromUniqueIndex: alle Voraussetzungen JETZT pruefen, bevor Filegroups, Partition
+		# Function und Scheme angelegt werden - ein Abbruch spaeter liesse diese verwaist zurueck.
+		$pkSource = $null
+		if ($PrimaryKeyFromUniqueIndex)
+		{
+			$pkFail = {
+				param ([string]$Reason)
+				$m = "-PrimaryKeyFromUniqueIndex '$PrimaryKeyFromUniqueIndex': $Reason"
+				Invoke-sqmLogging -Message $m -FunctionName $functionName -Level "ERROR"
+				throw $m
+			}
+			if ($Method -ne 'Default') { & $pkFail "nur mit -Method Default moeglich (angegeben: $Method)." }
+
+			$ixLiteral = $PrimaryKeyFromUniqueIndex -replace "'", "''"
+			$pkIdxQuery = @"
+SELECT i.index_id, i.name, i.type_desc, i.is_unique, i.has_filter, i.is_unique_constraint,
+       (SELECT COUNT(*) FROM sys.indexes x WHERE x.object_id = i.object_id AND x.index_id = 1) AS HasClustered,
+       (SELECT COUNT(*) FROM sys.key_constraints k WHERE k.parent_object_id = i.object_id AND k.type = 'PK') AS HasPrimaryKey
+FROM sys.indexes i
+WHERE i.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND i.name = N'$ixLiteral'
+"@
+			$pkIdx = Invoke-DbaQuery @connParams -Query $pkIdxQuery -ErrorAction Stop -EnableException -As PSObject
+			if (-not $pkIdx) { & $pkFail "Index nicht gefunden auf '$Schema.$Table'." }
+			if ([int]$pkIdx.HasClustered -gt 0) { & $pkFail "'$Schema.$Table' hat bereits einen Clustered Index - die Option ist nur fuer Heaps gedacht." }
+			if ([int]$pkIdx.HasPrimaryKey -gt 0) { & $pkFail "'$Schema.$Table' hat bereits einen Primary Key." }
+			if ($pkIdx.type_desc -ne 'NONCLUSTERED' -or -not [bool]$pkIdx.is_unique) { & $pkFail "kein eindeutiger Nonclustered Index (Typ $($pkIdx.type_desc), eindeutig: $($pkIdx.is_unique))." }
+			if ([bool]$pkIdx.has_filter) { & $pkFail "gefilterter Index - ein Primary Key gilt fuer alle Zeilen und kann keinen Filter uebernehmen." }
+
+			$pkColQuery = @"
+SELECT c.name AS ColumnName, c.is_nullable, ic.is_descending_key
+FROM sys.index_columns ic
+JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+WHERE ic.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND ic.index_id = $([int]$pkIdx.index_id) AND ic.key_ordinal > 0
+ORDER BY ic.key_ordinal
+"@
+			$pkCols = @(Invoke-DbaQuery @connParams -Query $pkColQuery -ErrorAction Stop -EnableException -As PSObject)
+			$nullable = @($pkCols | Where-Object { [bool]$_.is_nullable } | ForEach-Object { $_.ColumnName })
+			if ($nullable.Count -gt 0) { & $pkFail "Schluesselspalte(n) erlauben NULL: $($nullable -join ', '). Ein Primary Key verlangt NOT NULL." }
+			if ($PartitionColumn -notin $pkCols.ColumnName) { & $pkFail "die Partitionsspalte '$PartitionColumn' ist nicht im Schluessel ($($pkCols.ColumnName -join ', ')). Ein aligned eindeutiger Index muss sie enthalten; sie anzuhaengen wuerde die Eindeutigkeit aendern." }
+
+			$fkRefQuery = "SELECT fk.name AS ForeignKeyName, OBJECT_SCHEMA_NAME(fk.parent_object_id) + '.' + OBJECT_NAME(fk.parent_object_id) AS ReferencingTable FROM sys.foreign_keys fk WHERE fk.referenced_object_id = OBJECT_ID(N'[$Schema].[$Table]') AND fk.key_index_id = $([int]$pkIdx.index_id);"
+			$fkRefs = @(Invoke-DbaQuery @connParams -Query $fkRefQuery -ErrorAction Stop -EnableException -As PSObject)
+			if ($fkRefs.Count -gt 0) { & $pkFail "Fremdschluessel verweisen auf genau diesen Index und verhindern dessen Entfernen: $(($fkRefs | ForEach-Object { "$($_.ReferencingTable) ($($_.ForeignKeyName))" }) -join '; ')." }
+
+			if (-not $PrimaryKeyName) { $PrimaryKeyName = "PK_$Table" }
+			$pkNameLiteral = $PrimaryKeyName -replace "'", "''"
+			$nameTaken = Invoke-DbaQuery @connParams -Query "SELECT 1 AS x FROM sys.objects WHERE name = N'$pkNameLiteral' AND schema_id = SCHEMA_ID(N'$Schema');" -ErrorAction Stop -EnableException -As PSObject
+			if ($nameTaken) { & $pkFail "ein Objekt namens '$PrimaryKeyName' existiert im Schema '$Schema' bereits - mit -PrimaryKeyName einen anderen Namen angeben." }
+
+			$pkSource = [PSCustomObject]@{
+				IndexName          = [string]$pkIdx.name
+				IsUniqueConstraint = [bool]$pkIdx.is_unique_constraint
+				KeyColumnList      = ($pkCols | ForEach-Object { "[$($_.ColumnName)]$(if ([bool]$_.is_descending_key) { ' DESC' })" }) -join ', '
+			}
+			Invoke-sqmLogging -Message "-PrimaryKeyFromUniqueIndex: '$($pkSource.IndexName)' ($($pkCols.ColumnName -join ', ')) wird zu PRIMARY KEY CLUSTERED '$PrimaryKeyName' auf dem Partition Scheme. Voraussetzungen erfuellt." -FunctionName $functionName -Level "INFO"
+		}
+		elseif ($PrimaryKeyName)
+		{
+			Invoke-sqmLogging -Message "-PrimaryKeyName ohne -PrimaryKeyFromUniqueIndex hat keine Wirkung." -FunctionName $functionName -Level "WARNING"
 		}
 
 		# -Method BatchedSwap baut eine NEUE Tabelle auf und benennt sie an die Stelle der alten -
@@ -634,7 +725,31 @@ CREATE ${uniqueKw}CLUSTERED INDEX [$($ci.IndexName)]
 			else
 			{
 				# Heap
-				if ($Method -eq 'NewTableSwap')
+				if ($pkSource)
+				{
+					$dropSourceSql = if ($pkSource.IsUniqueConstraint) { "ALTER TABLE [$Schema].[$Table] DROP CONSTRAINT [$($pkSource.IndexName)];" } else { "DROP INDEX [$($pkSource.IndexName)] ON [$Schema].[$Table];" }
+					$addPkSql = @"
+ALTER TABLE [$Schema].[$Table] ADD CONSTRAINT [$PrimaryKeyName] PRIMARY KEY CLUSTERED ($($pkSource.KeyColumnList))
+    WITH (ONLINE = $onlineClause)
+    ON [$($scheme.PartitionSchemeName)]([$PartitionColumn]);
+"@
+					if ($onlineEdition)
+					{
+						# ONLINE: erst den PK anlegen, dann den alten Index entfernen - die Eindeutigkeit
+						# ist so zu jedem Zeitpunkt erzwungen. Kostet einen zusaetzlichen Neuaufbau des
+						# alten Index beim Wechsel Heap -> Clustered, dafuer keine lange Transaktion
+						# um eine Online-Operation.
+						$ddl = "$addPkSql`n$dropSourceSql"
+					}
+					else
+					{
+						# OFFLINE: alten Index zuerst entfernen, damit er beim Wechsel Heap -> Clustered
+						# nicht noch einmal umsonst neu aufgebaut wird (bei sehr grossen Tabellen
+						# erheblich). In einer Transaktion: scheitert der PK, kommt der Index zurueck.
+						$ddl = "SET XACT_ABORT ON;`nBEGIN TRANSACTION;`n$dropSourceSql`n$addPkSql`nCOMMIT TRANSACTION;"
+					}
+				}
+				elseif ($Method -eq 'NewTableSwap')
 				{
 					Invoke-sqmLogging -Message "-Method NewTableSwap fuer Heap '$Schema.$Table' - Basisvariante (Tabellenkopie ohne vollstaendige Constraint-/Trigger-/Berechtigungs-Uebernahme, fuer sehr grosse Heaps als Alternative zum direkten Index-Aufbau)." -FunctionName $functionName -Level "WARNING"
 					$tmpTable = "${Table}_sqmPartTmp"
@@ -660,7 +775,9 @@ CREATE CLUSTERED INDEX [IX_${Table}_$PartitionColumn]
 
 			try
 			{
-				Invoke-DbaQuery @connParams -Query $ddl -ErrorAction Stop
+				# -EnableException: ohne verschluckt Invoke-DbaQuery den SQL-Fehler, und der Umbau
+				# wuerde trotzdem als erfolgreich gemeldet.
+				Invoke-DbaQuery @connParams -Query $ddl -ErrorAction Stop -EnableException
 				Invoke-sqmLogging -Message "$applyAction - erfolgreich." -FunctionName $functionName -Level "INFO"
 			}
 			catch
@@ -684,6 +801,26 @@ CREATE CLUSTERED INDEX [IX_${Table}_$PartitionColumn]
 					Invoke-sqmLogging -Message "Fehler bei Kompressionsanwendung (Umbau wird fortgesetzt): $($_.Exception.Message). Kompression kann spaeter manuell mit ALTER TABLE ... REBUILD PARTITION angewendet werden." -FunctionName $functionName -Level "WARNING"
 				}
 			}
+		}
+
+		# Nicht ausgerichtete Nonclustered-Indizes blockieren SWITCH PARTITION (Archiv/Retention).
+		# Nicht automatisch umbauen (Filter, INCLUDE, eindeutige Indizes ohne Partitionsspalte
+		# brauchen eine bewusste Entscheidung), aber deutlich melden.
+		$nonAlignedIndexes = @()
+		try
+		{
+			$alignParams = @{ SqlInstance = $SqlInstance; Database = $Database; Schema = $Schema; Table = $Table }
+			if ($SqlCredential) { $alignParams['SqlCredential'] = $SqlCredential }
+			$alignment = Test-sqmPartitionIndexAlignment @alignParams
+			$nonAlignedIndexes = @($alignment.NonAlignedIndexes | ForEach-Object { $_.IndexName })
+			if ($nonAlignedIndexes.Count -gt 0)
+			{
+				Invoke-sqmLogging -Message "Nicht partitionsausgerichtete Indizes auf '$Schema.$Table': $($nonAlignedIndexes -join ', '). Sie verhindern SWITCH PARTITION (Invoke-sqmPartitionArchive/Retention). Entweder auf '$($scheme.PartitionSchemeName)([$PartitionColumn])' neu anlegen oder, falls ueberfluessig, entfernen." -FunctionName $functionName -Level "WARNING"
+			}
+		}
+		catch
+		{
+			Invoke-sqmLogging -Message "Ausrichtung der Indizes nicht pruefbar: $($_.Exception.Message)" -FunctionName $functionName -Level "WARNING"
 		}
 
 		# =========================================================================================
@@ -722,6 +859,8 @@ CREATE CLUSTERED INDEX [IX_${Table}_$PartitionColumn]
 			Status                = 'Success'
 			Registered            = $registered
 			ViewCutoverUsed       = [bool]$ViewCutover
+			PrimaryKeyCreated     = $(if ($pkSource) { $PrimaryKeyName } else { $null })
+			NonAlignedIndexes     = $nonAlignedIndexes
 		}
 	}
 	catch

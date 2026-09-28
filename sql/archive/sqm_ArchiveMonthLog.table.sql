@@ -7,11 +7,11 @@
 -- Migrationsprojekt einer bestimmten Quelldatenbank, nicht zu instanzweiter
 -- Wartungs-Konfiguration.
 --
--- LastKeyProcessed1..LastKeyProcessed4 ist der Fortsetzungspunkt fuer die
+-- LastKeyProcessed1..LastKeyProcessed5 ist der Fortsetzungspunkt fuer die
 -- Batch-Schleife innerhalb eines Monats (sqm_ArchiveMonthBatch), als TUPEL
 -- statt Einzelwert - seit Unterstuetzung zusammengesetzter Schluessel (z.B.
 -- CORO_DB.dbo.CARCHIVE mit VMTG/VID1/VID2/VSEQ). Ungenutzte Spalten (Migration
--- mit weniger als 4 Schluesselspalten) bleiben NULL. Weil pro Batch sowohl neue
+-- mit weniger als 5 Schluesselspalten) bleiben NULL. Weil pro Batch sowohl neue
 -- Zeilen eingefuegt als auch bereits archivierte, seither in der Quelle
 -- geaenderte Zeilen per MERGE aktualisiert werden, laesst sich "bis wohin bin
 -- ich gekommen" nicht mehr allein aus der Zielzeilenzahl ableiten (anders als
@@ -50,6 +50,7 @@ BEGIN
         LastKeyProcessed2   SQL_VARIANT   NULL,
         LastKeyProcessed3   SQL_VARIANT   NULL,
         LastKeyProcessed4   SQL_VARIANT   NULL,
+        LastKeyProcessed5   SQL_VARIANT   NULL,
         StartedAt           DATETIME2     NOT NULL CONSTRAINT DF_sqm_ArchiveMonthLog_StartedAt DEFAULT (SYSDATETIME()),
         CompletedAt         DATETIME2     NULL,
         CONSTRAINT UQ_sqm_ArchiveMonthLog UNIQUE (SchemaName, TableName, ArchiveDatabaseName, YYYYMM)
@@ -84,5 +85,12 @@ GO
 IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.sqm_ArchiveMonthLog') AND name = N'LastKeyProcessed4')
 BEGIN
     ALTER TABLE dbo.sqm_ArchiveMonthLog ADD LastKeyProcessed4 SQL_VARIANT NULL;
+END
+GO
+-- 5. Tupel-Spalte (seit 1.11.0.0): CORO_DB.dbo.CARCHIVE ist erst mit VTDAT als 5. Spalte
+-- eindeutig - dieselbe 4er-Kombination kann innerhalb eines Monats an mehreren Tagen vorkommen.
+IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.sqm_ArchiveMonthLog') AND name = N'LastKeyProcessed5')
+BEGIN
+    ALTER TABLE dbo.sqm_ArchiveMonthLog ADD LastKeyProcessed5 SQL_VARIANT NULL;
 END
 GO

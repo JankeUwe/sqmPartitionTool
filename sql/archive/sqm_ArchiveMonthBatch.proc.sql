@@ -7,12 +7,12 @@
 -- jeder Aufruf beliebig oft wiederholbar (idempotent), auch wenn eine Zeile
 -- schon einmal archiviert wurde und sich seither in der Quelle geaendert hat.
 --
--- @KeyColumns: eine oder mehrere (max. 4) durch Komma getrennte Spaltennamen,
+-- @KeyColumns: eine oder mehrere (max. 5) durch Komma getrennte Spaltennamen,
 -- in key_ordinal-Reihenfolge (z.B. N'VMTG,VID1,VID2,VSEQ'). Zusammen bilden
 -- sie den (moeglicherweise zusammengesetzten) eindeutigen Schluessel fuer den
 -- MERGE-Abgleich UND fuer die Keyset-Pagination innerhalb eines Monats.
 --
--- Fortsetzpunkt (LastKeyProcessed1..4 in dbo.sqm_ArchiveMonthLog) liegt als
+-- Fortsetzpunkt (LastKeyProcessed1..5 in dbo.sqm_ArchiveMonthLog) liegt als
 -- TUPEL vor, nicht im Prozeduraufruf selbst - ein Abbruch zwischen zwei
 -- Aufrufen (Netzwerk, Prozess-Kill) verliert dadurch nichts: der naechste
 -- Aufruf fuer denselben Monat liest den Stand aus der Log-Tabelle und macht
@@ -142,9 +142,9 @@ BEGIN
     FROM OPENJSON(N'["' + REPLACE(@KeyColumns, N',', N'","') + N'"]');
 
     DECLARE @KeyColCount INT = (SELECT COUNT(*) FROM @KeyCols);
-    IF @KeyColCount NOT BETWEEN 1 AND 4
+    IF @KeyColCount NOT BETWEEN 1 AND 5
     BEGIN
-        RAISERROR(N'sqm_ArchiveMonthBatch: @KeyColumns muss 1 bis 4 Spalten enthalten (erhalten: %d).', 16, 1, @KeyColCount);
+        RAISERROR(N'sqm_ArchiveMonthBatch: @KeyColumns muss 1 bis 5 Spalten enthalten (erhalten: %d).', 16, 1, @KeyColCount);
         RETURN;
     END
 
@@ -162,8 +162,8 @@ BEGIN
         VALUES (@SchemaName, @TableName, @ArchiveDatabaseName, @YYYYMM, N'InProgress', 0);
     END
 
-    DECLARE @l1 SQL_VARIANT, @l2 SQL_VARIANT, @l3 SQL_VARIANT, @l4 SQL_VARIANT;
-    SELECT @l1 = LastKeyProcessed1, @l2 = LastKeyProcessed2, @l3 = LastKeyProcessed3, @l4 = LastKeyProcessed4
+    DECLARE @l1 SQL_VARIANT, @l2 SQL_VARIANT, @l3 SQL_VARIANT, @l4 SQL_VARIANT, @l5 SQL_VARIANT;
+    SELECT @l1 = LastKeyProcessed1, @l2 = LastKeyProcessed2, @l3 = LastKeyProcessed3, @l4 = LastKeyProcessed4, @l5 = LastKeyProcessed5
     FROM dbo.sqm_ArchiveMonthLog
     WHERE SchemaName = @SchemaName AND TableName = @TableName
       AND ArchiveDatabaseName = @ArchiveDatabaseName AND YYYYMM = @YYYYMM;
@@ -264,7 +264,7 @@ BEGIN
     DECLARE @Sql NVARCHAR(MAX) = N'
 ' + CASE WHEN @HasIdentity = 1 THEN N'SET IDENTITY_INSERT ' + @ArchiveFullName + N' ON;' ELSE N'' END + N'
 
-DECLARE @MergeOutput TABLE (BatchSeq INT NOT NULL, K1 SQL_VARIANT NULL, K2 SQL_VARIANT NULL, K3 SQL_VARIANT NULL, K4 SQL_VARIANT NULL);
+DECLARE @MergeOutput TABLE (BatchSeq INT NOT NULL, K1 SQL_VARIANT NULL, K2 SQL_VARIANT NULL, K3 SQL_VARIANT NULL, K4 SQL_VARIANT NULL, K5 SQL_VARIANT NULL);
 
 MERGE ' + @ArchiveFullName + N' AS tgt
 USING (
@@ -284,11 +284,11 @@ SELECT @pRowsThisCall = COUNT(*) FROM @MergeOutput;
 SELECT ' + @NewKeyAssignList + N' FROM @MergeOutput WHERE BatchSeq = (SELECT MAX(BatchSeq) FROM @MergeOutput);
 ' + CASE WHEN @HasIdentity = 1 THEN N'SET IDENTITY_INSERT ' + @ArchiveFullName + N' OFF;' ELSE N'' END;
 
-    DECLARE @n1 SQL_VARIANT, @n2 SQL_VARIANT, @n3 SQL_VARIANT, @n4 SQL_VARIANT;
+    DECLARE @n1 SQL_VARIANT, @n2 SQL_VARIANT, @n3 SQL_VARIANT, @n4 SQL_VARIANT, @n5 SQL_VARIANT;
 
     -- sp_executesql verlangt eine zur Parameterdefinition statisch passende
-    -- Argumentliste - da @KeyColCount variiert (1-4), hier bewusst als
-    -- expliziter 4-facher IF/ELSE-Cascade statt einer weiteren Ebene
+    -- Argumentliste - da @KeyColCount variiert (1-5), hier bewusst als
+    -- expliziter 5-facher IF/ELSE-Cascade statt einer weiteren Ebene
     -- dynamisch gebauten SQLs (Lesbarkeit/Nachvollziehbarkeit vor Eleganz,
     -- bei Code der gegen eine 7-TB-Produktionstabelle laeuft).
     IF @KeyColCount = 1
@@ -306,17 +306,22 @@ SELECT ' + @NewKeyAssignList + N' FROM @MergeOutput WHERE BatchSeq = (SELECT MAX
             N'@pBatchSize INT, @pPeriodStart SQL_VARIANT, @pPeriodEnd SQL_VARIANT, @pLastKey1 SQL_VARIANT, @pLastKey2 SQL_VARIANT, @pLastKey3 SQL_VARIANT, @pRowsThisCall BIGINT OUTPUT, @pNewLastKey1 SQL_VARIANT OUTPUT, @pNewLastKey2 SQL_VARIANT OUTPUT, @pNewLastKey3 SQL_VARIANT OUTPUT',
             @pBatchSize = @BatchSize, @pPeriodStart = @pPeriodStartVal, @pPeriodEnd = @pPeriodEndVal, @pLastKey1 = @l1, @pLastKey2 = @l2, @pLastKey3 = @l3,
             @pRowsThisCall = @RowsThisCall OUTPUT, @pNewLastKey1 = @n1 OUTPUT, @pNewLastKey2 = @n2 OUTPUT, @pNewLastKey3 = @n3 OUTPUT;
-    ELSE
+    ELSE IF @KeyColCount = 4
         EXEC sp_executesql @Sql,
             N'@pBatchSize INT, @pPeriodStart SQL_VARIANT, @pPeriodEnd SQL_VARIANT, @pLastKey1 SQL_VARIANT, @pLastKey2 SQL_VARIANT, @pLastKey3 SQL_VARIANT, @pLastKey4 SQL_VARIANT, @pRowsThisCall BIGINT OUTPUT, @pNewLastKey1 SQL_VARIANT OUTPUT, @pNewLastKey2 SQL_VARIANT OUTPUT, @pNewLastKey3 SQL_VARIANT OUTPUT, @pNewLastKey4 SQL_VARIANT OUTPUT',
             @pBatchSize = @BatchSize, @pPeriodStart = @pPeriodStartVal, @pPeriodEnd = @pPeriodEndVal, @pLastKey1 = @l1, @pLastKey2 = @l2, @pLastKey3 = @l3, @pLastKey4 = @l4,
             @pRowsThisCall = @RowsThisCall OUTPUT, @pNewLastKey1 = @n1 OUTPUT, @pNewLastKey2 = @n2 OUTPUT, @pNewLastKey3 = @n3 OUTPUT, @pNewLastKey4 = @n4 OUTPUT;
+    ELSE
+        EXEC sp_executesql @Sql,
+            N'@pBatchSize INT, @pPeriodStart SQL_VARIANT, @pPeriodEnd SQL_VARIANT, @pLastKey1 SQL_VARIANT, @pLastKey2 SQL_VARIANT, @pLastKey3 SQL_VARIANT, @pLastKey4 SQL_VARIANT, @pLastKey5 SQL_VARIANT, @pRowsThisCall BIGINT OUTPUT, @pNewLastKey1 SQL_VARIANT OUTPUT, @pNewLastKey2 SQL_VARIANT OUTPUT, @pNewLastKey3 SQL_VARIANT OUTPUT, @pNewLastKey4 SQL_VARIANT OUTPUT, @pNewLastKey5 SQL_VARIANT OUTPUT',
+            @pBatchSize = @BatchSize, @pPeriodStart = @pPeriodStartVal, @pPeriodEnd = @pPeriodEndVal, @pLastKey1 = @l1, @pLastKey2 = @l2, @pLastKey3 = @l3, @pLastKey4 = @l4, @pLastKey5 = @l5,
+            @pRowsThisCall = @RowsThisCall OUTPUT, @pNewLastKey1 = @n1 OUTPUT, @pNewLastKey2 = @n2 OUTPUT, @pNewLastKey3 = @n3 OUTPUT, @pNewLastKey4 = @n4 OUTPUT, @pNewLastKey5 = @n5 OUTPUT;
 
     -- ------------------------------------------------------------------------
     -- 5. Log-Zeile fortschreiben. Weniger Zeilen als @BatchSize zurueckgekommen
     --    (auch 0) heisst: fuer diesen Monat gibt es keine weiteren Zeilen mehr.
-    --    Alle 4 Tupel-Spalten werden unbedingt geschrieben (ISNULL ist fuer
-    --    ungenutzte Spalten ein No-Op, da @n2/@n3/@n4 dann NULL bleiben).
+    --    Alle 5 Tupel-Spalten werden unbedingt geschrieben (ISNULL ist fuer
+    --    ungenutzte Spalten ein No-Op, da @n2..@n5 dann NULL bleiben).
     -- ------------------------------------------------------------------------
     SET @MonthComplete = CASE WHEN @RowsThisCall < @BatchSize THEN 1 ELSE 0 END;
 
@@ -326,6 +331,7 @@ SELECT ' + @NewKeyAssignList + N' FROM @MergeOutput WHERE BatchSeq = (SELECT MAX
         LastKeyProcessed2 = ISNULL(@n2, LastKeyProcessed2),
         LastKeyProcessed3 = ISNULL(@n3, LastKeyProcessed3),
         LastKeyProcessed4 = ISNULL(@n4, LastKeyProcessed4),
+        LastKeyProcessed5 = ISNULL(@n5, LastKeyProcessed5),
         Status = CASE WHEN @MonthComplete = 1 THEN N'Completed' ELSE Status END,
         CompletedAt = CASE WHEN @MonthComplete = 1 THEN SYSDATETIME() ELSE CompletedAt END
     WHERE SchemaName = @SchemaName AND TableName = @TableName
