@@ -713,7 +713,7 @@
     # komplett ausgeblendet statt ein ungenutztes Feld anzuzeigen. Auswahl per CheckedListBox
     # (tatsaechliche Spalten der Tabelle) statt Freitext - kein Tippfehlerrisiko bei Spaltennamen.
     $lbl6Key = New-Object System.Windows.Forms.Label
-    $lbl6Key.Text = 'Key Column(s) (table has no simple unique key - pick one):'
+    $lbl6Key.Text = 'Key Column(s) (no usable clustered key - check ALL columns of a unique key, max. 4):'
     $lbl6Key.Location = New-Object System.Drawing.Point(24, 40)
     $lbl6Key.AutoSize = $true
     $lbl6Key.ForeColor = $cDim
@@ -920,6 +920,19 @@ ORDER BY ic.key_ordinal
         catch { $script:step6CopyKeyColumnNeeded = $true }
     }
 
+    # Ob die jeweilige Schluesselliste gilt, NICHT ueber .Visible abfragen: WinForms liefert fuer
+    # .Visible $false, sobald ein uebergeordnetes Panel ausgeblendet ist - beim Klick auf Execute
+    # (Schritt 7) ist das Panel von Schritt 6 immer ausgeblendet, die Auswahl wurde dadurch
+    # stillschweigend ignoriert und -KeyColumn nie uebergeben.
+    function Test-Step6KeyListActive
+    {
+        (-not $script:wiz.SourceIsPartitioned) -and $chk6MigrateNow.Checked -and $script:step6KeyColumnNeeded
+    }
+    function Test-Step6CopyKeyListActive
+    {
+        $script:wiz.SourceIsPartitioned -and $script:step6CopyKeyColumnNeeded
+    }
+
     function Set-Step6Mode
     {
         $copyMode = $script:wiz.SourceIsPartitioned
@@ -1037,7 +1050,7 @@ ORDER BY ic.key_ordinal
         {
             $targetTableForSummary = if ($txt6TargetTable.Text.Trim()) { $txt6TargetTable.Text.Trim() } else { $script:wiz.TableName }
             $lines.Add("Mode                 : COPY (new partitioning) -> '$($txt6TargetDb.Text.Trim()).$($script:wiz.SchemaName).$targetTableForSummary'")
-            if ($clb6CopyKey.Visible -and $clb6CopyKey.CheckedItems.Count -gt 0) { $lines.Add("Key Column           : $($clb6CopyKey.CheckedItems[0]) (explicit)") }
+            if ((Test-Step6CopyKeyListActive) -and $clb6CopyKey.CheckedItems.Count -gt 0) { $lines.Add("Key Column           : $(($clb6CopyKey.CheckedItems | ForEach-Object { $_ }) -join ', ') (explicit)") }
             else { $lines.Add('Key Column           : (auto-derive from single-column clustered index/PK)') }
             $lines.Add("Partitions           : $($script:wiz.Boundaries.Count + 1) ($($script:wiz.Boundaries.Count) boundary value(s))")
             $lines.Add('                       Source table stays fully active and unchanged (no rename, no cutover).')
@@ -1047,7 +1060,7 @@ ORDER BY ic.key_ordinal
         if ($chk6MigrateNow.Checked)
         {
             $lines.Add("Mode                 : Migrate to archive database NOW -> '$($txt6ArchiveDb.Text.Trim())'")
-            if ($clb6Key.Visible -and $clb6Key.CheckedItems.Count -gt 0) { $lines.Add("Key Column(s)        : $(($clb6Key.CheckedItems | ForEach-Object { $_ }) -join ', ') (explicit)") }
+            if ((Test-Step6KeyListActive) -and $clb6Key.CheckedItems.Count -gt 0) { $lines.Add("Key Column(s)        : $(($clb6Key.CheckedItems | ForEach-Object { $_ }) -join ', ') (explicit)") }
             else { $lines.Add('Key Column(s)        : (auto-derive from clustered index/PK)') }
             $lines.Add('                       Source table will be renamed and replaced by a view onto the')
             $lines.Add('                       archive copy once all closed periods are migrated (current,')
@@ -1075,9 +1088,11 @@ ORDER BY ic.key_ordinal
                 [System.Windows.Forms.MessageBox]::Show("Please enter a Target Database name.", 'Missing input', 'OK', 'Warning') | Out-Null
                 return
             }
-            if ($clb6CopyKey.Visible -and $clb6CopyKey.CheckedItems.Count -eq 0)
+            # Genau EINE Spalte: Copy-sqmPartitionedTable blaettert ueber eine einzelne Spalte.
+            # Frueher wurde bei mehreren Haken stillschweigend nur die erste genommen.
+            if ((Test-Step6CopyKeyListActive) -and $clb6CopyKey.CheckedItems.Count -ne 1)
             {
-                [System.Windows.Forms.MessageBox]::Show("Please check exactly one Key Column - this table has no single-column clustered index/PK that could be derived automatically.", 'Missing input', 'OK', 'Warning') | Out-Null
+                [System.Windows.Forms.MessageBox]::Show("Please check exactly ONE Key Column (checked: $($clb6CopyKey.CheckedItems.Count)).`n`nCopying an already partitioned table pages through a single column that is unique on its own. A composite key (several columns) is not supported for this copy mode.", 'Key Column', 'OK', 'Warning') | Out-Null
                 return
             }
 
@@ -1109,7 +1124,7 @@ ORDER BY ic.key_ordinal
                     ErrorAction         = 'Stop'
                     EnableException     = $true
                 }
-                if ($clb6CopyKey.Visible -and $clb6CopyKey.CheckedItems.Count -gt 0) { $copyParams['KeyColumn'] = [string]$clb6CopyKey.CheckedItems[0] }
+                if (Test-Step6CopyKeyListActive) { $copyParams['KeyColumn'] = [string]$clb6CopyKey.CheckedItems[0] }
                 $result = Copy-sqmPartitionedTable @cp @copyParams
                 Add-Log "Copy completed: $($result.RowsCopied) row(s) copied, $($result.RowsVerified) row(s) verified in target, status $($result.Status)."
                 Add-Log 'DONE.'
@@ -1171,13 +1186,14 @@ ORDER BY ic.key_ordinal
                     EnableException         = $true
                 }
                 if ($script:wiz.BoundaryType) { $archParams['BoundaryType'] = $script:wiz.BoundaryType; $archParams['SurrogateDateFormat'] = $script:wiz.SurrogateDateFormat }
-                if ($clb6Key.Visible -and $clb6Key.CheckedItems.Count -gt 0)
+                $keyCount = $clb6Key.CheckedItems.Count
+                if ((Test-Step6KeyListActive) -and $keyCount -ge 1 -and $keyCount -le 4)
                 {
                     $archParams['KeyColumn'] = @($clb6Key.CheckedItems | ForEach-Object { $_ })
                 }
-                elseif ($clb6Key.Visible)
+                elseif (Test-Step6KeyListActive)
                 {
-                    [System.Windows.Forms.MessageBox]::Show("Please check at least one Key Column - this table has no simple unique key that could be derived automatically.", 'Missing input', 'OK', 'Warning') | Out-Null
+                    [System.Windows.Forms.MessageBox]::Show("Please check 1 to 4 Key Columns (checked: $keyCount) - together they must identify a row uniquely. This table has no clustered key that could be derived automatically.", 'Key Column', 'OK', 'Warning') | Out-Null
                     $btn7Execute.Enabled = $true
                     $btnBack.Enabled = $true
                     return

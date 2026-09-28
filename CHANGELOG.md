@@ -1,4 +1,24 @@
-# sqmPartitionTool — Changelog
+﻿# sqmPartitionTool — Changelog
+
+## [1.10.1.0] — 2026-09-28
+
+### Fix: GUI ignored the checked Key Column(s) when executing
+
+The key column lists in step 6 were read via `.Visible` when the Execute button in step 7 was
+clicked. WinForms reports `.Visible = $false` for every control whose parent panel is hidden, and
+the step 6 panel is always hidden in step 7. Result: the checked columns were never passed as
+`-KeyColumn`. For a heap (e.g. a table with only a unique NONCLUSTERED key) the migration then fell
+back to auto-derivation and stopped with "'-KeyColumn' ist Pflicht". The step 7 summary was not
+affected because it is built while step 6 is still shown, so it looked correct. Now both lists are
+evaluated from the wizard state instead of `.Visible`.
+
+- **Migrate to archive now:** 1 to 4 checked columns are passed as a composite `-KeyColumn`; 0 or
+  more than 4 is rejected with a message. The label now says to check ALL columns of the unique
+  key instead of "pick one".
+- **Copy of an already partitioned table:** `Copy-sqmPartitionedTable` pages through a single
+  column. Previously, with several checked columns, only the first one was used silently (and only
+  that one was shown in the summary). Now exactly one checked column is required; otherwise the
+  wizard says so and explains that composite keys are not supported in copy mode.
 
 ## [1.10.0.0] — 2026-08-29
 
