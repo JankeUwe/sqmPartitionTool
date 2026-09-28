@@ -137,6 +137,16 @@
     ACHTUNG: der laufende, noch nicht abgeschlossene Monat wird nie automatisch migriert (siehe
     -EndPeriod) - dessen Zeilen bleiben nach dem Cutover in der umbenannten Original-Tabelle
     zurueck und muessen vom Admin manuell gepflegt/nachgezogen werden, bevor diese geloescht wird.
+.PARAMETER PrimaryKeyFromUniqueIndex
+    Name eines eindeutigen Nonclustered Index der QUELLTABELLE. Beim Anlegen der Archiv-Kopie wird
+    er dort mit denselben Schluesselspalten angelegt und von Invoke-sqmTablePartitionConversion
+    zum PRIMARY KEY CLUSTERED auf dem Partition Scheme gemacht - ohne diese Option haette die
+    Archiv-Kopie keinen eindeutigen Schluessel (SELECT INTO uebernimmt keine Indizes). Ohne
+    -KeyColumn werden dessen Schluesselspalten auch als -KeyColumn verwendet (max. 5).
+.PARAMETER CreateArchiveTableOnly
+    Nur die partitionierte Archiv-Kopie anlegen, keine Daten uebertragen. Ein spaeterer Aufruf
+    ohne diesen Schalter uebertraegt die Daten in die dann vorhandene Tabelle. Nicht zusammen mit
+    -PurgeSourceAfterArchive/-CutoverToArchiveView.
 .PARAMETER RenamedTableSuffix
     Nur relevant mit -CutoverToArchiveView. Suffix fuer die umbenannte Original-Tabelle.
     Standard: '_Original' (gleiche Konvention wie Invoke-sqmTableRelocation).
@@ -255,6 +265,12 @@ function Invoke-sqmTableArchiveMigration
 		[string]$RenamedTableSuffix = '_Original',
 
 		[Parameter(Mandatory = $false)]
+		[string]$PrimaryKeyFromUniqueIndex,
+
+		[Parameter(Mandatory = $false)]
+		[switch]$CreateArchiveTableOnly,
+
+		[Parameter(Mandatory = $false)]
 		[System.Management.Automation.PSCredential]$SqlCredential,
 
 		[Parameter(Mandatory = $false)]
@@ -335,6 +351,35 @@ function Invoke-sqmTableArchiveMigration
 					MonthsProcessed = 0; MonthsAlreadyDone = 0; TotalRowsArchived = 0
 					CutoverPerformed = $false; Status = 'NothingToDo'
 				}
+			}
+		}
+
+		if ($CreateArchiveTableOnly -and ($PurgeSourceAfterArchive -or $CutoverToArchiveView))
+		{
+			throw "-CreateArchiveTableOnly uebertraegt keine Daten und ist daher nicht mit -PurgeSourceAfterArchive/-CutoverToArchiveView kombinierbar."
+		}
+
+		# Schluesselspalten des Index, der in der Archiv-Kopie zum PK wird. Dient ohne -KeyColumn
+		# zugleich als Schluessel fuer MERGE/Pagination - er ist per Definition eindeutig.
+		$pkIndexCols = @()
+		if ($PrimaryKeyFromUniqueIndex)
+		{
+			$pkIdxLiteral = $PrimaryKeyFromUniqueIndex -replace "'", "''"
+			$pkIdxQuery = @"
+SELECT i.is_unique, i.type_desc, c.name AS ColumnName, ic.is_descending_key
+FROM sys.indexes i
+JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.key_ordinal > 0
+JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+WHERE i.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND i.name = N'$pkIdxLiteral'
+ORDER BY ic.key_ordinal
+"@
+			$pkIndexCols = @(Invoke-DbaQuery @connParams -Database $Database -Query $pkIdxQuery -ErrorAction Stop -EnableException -As PSObject)
+			if ($pkIndexCols.Count -eq 0) { throw "-PrimaryKeyFromUniqueIndex: Index '$PrimaryKeyFromUniqueIndex' auf '$Schema.$Table' nicht gefunden." }
+			if (-not [bool]$pkIndexCols[0].is_unique -or $pkIndexCols[0].type_desc -ne 'NONCLUSTERED') { throw "-PrimaryKeyFromUniqueIndex: '$PrimaryKeyFromUniqueIndex' ist kein eindeutiger Nonclustered Index." }
+			if (-not $KeyColumn)
+			{
+				$KeyColumn = @($pkIndexCols | ForEach-Object { $_.ColumnName })
+				Invoke-sqmLogging -Message "-KeyColumn aus '$PrimaryKeyFromUniqueIndex' uebernommen: $($KeyColumn -join ', ')." -FunctionName $functionName -Level "INFO"
 			}
 		}
 
@@ -478,9 +523,30 @@ WHERE i.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND c.name = N'$DateColumn'
 			}
 		}
 
+		if ($CreateArchiveTableOnly -and $archiveExists)
+		{
+			Invoke-sqmLogging -Message "-CreateArchiveTableOnly: '$ArchiveDatabaseName.$ArchiveSchemaName.$Table' existiert bereits - nichts anzulegen." -FunctionName $functionName -Level "INFO"
+			return [PSCustomObject]@{
+				SchemaName = $Schema; TableName = $Table; ArchiveDatabaseName = $ArchiveDatabaseName
+				MonthsProcessed = 0; MonthsAlreadyDone = $completedPeriods.Count; TotalRowsArchived = 0
+				CutoverPerformed = $false; ArchiveTableCreated = $false; Status = 'ArchiveTableExists'
+			}
+		}
+
+		# Eine bereits vorhandene, aber NICHT partitionierte Archiv-Kopie (z.B. ein frueherer
+		# Lauf, der nach SELECT INTO abgebrochen ist) wuerde sonst ungefragt unpartitioniert befuellt.
+		if ($archiveExists)
+		{
+			$archPartQuery = "SELECT 1 AS x FROM [$ArchiveDatabaseName].sys.indexes i JOIN [$ArchiveDatabaseName].sys.partition_schemes ps ON ps.data_space_id = i.data_space_id WHERE i.object_id = OBJECT_ID(N'[$ArchiveDatabaseName].[$ArchiveSchemaName].[$Table]') AND i.index_id IN (0, 1);"
+			if (-not (Invoke-DbaQuery @connParams -Database $Database -Query $archPartQuery -ErrorAction Stop -EnableException -As PSObject))
+			{
+				throw "'$ArchiveDatabaseName.$ArchiveSchemaName.$Table' existiert, ist aber nicht partitioniert. Vermutlich ein abgebrochener frueherer Lauf - Tabelle pruefen und (wenn leer) loeschen, dann erneut starten."
+			}
+		}
+
 		$action = "'$Schema.$Table' -> '$ArchiveDatabaseName.$ArchiveSchemaName.$Table': " +
-		$(if (-not $archiveExists) { "Archiv-Kopie anlegen + partitionieren, dann " } else { '' }) +
-		"$($pendingPeriods.Count) Monat(e) archivieren ($StartPeriod - $EndPeriod)"
+		$(if (-not $archiveExists) { "Archiv-Kopie anlegen + partitionieren" } else { '' }) +
+		$(if ($CreateArchiveTableOnly) { ' (ohne Datenuebertragung)' } else { "$(if (-not $archiveExists) { ', dann ' })$($pendingPeriods.Count) Monat(e) archivieren ($StartPeriod - $EndPeriod)" })
 		if (-not $PSCmdlet.ShouldProcess($Database, $action)) { return }
 
 		# =========================================================================================
@@ -522,8 +588,35 @@ WHERE i.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND c.name = N'$DateColumn'
 			if ($Online) { $convParams['Online'] = $true }
 			if ($SqlCredential) { $convParams['SqlCredential'] = $SqlCredential }
 
-			Invoke-sqmTablePartitionConversion @convParams | Out-Null
-			Invoke-sqmLogging -Message "Archiv-Kopie '$ArchiveDatabaseName.$ArchiveSchemaName.$Table' partitioniert (Bereich $($srcRange.MinValue) - $($srcRange.MaxValue))." -FunctionName $functionName -Level "INFO"
+			try
+			{
+				if ($PrimaryKeyFromUniqueIndex)
+				{
+					# SELECT INTO uebernimmt keine Indizes: den eindeutigen Index auf der (leeren) Kopie
+					# nachbilden, die Umwandlung macht daraus den Clustered PK auf dem Partition Scheme.
+					$pkColList = ($pkIndexCols | ForEach-Object { "[$($_.ColumnName)]$(if ([bool]$_.is_descending_key) { ' DESC' })" }) -join ', '
+					Invoke-DbaQuery @connParams -Database $ArchiveDatabaseName -Query "CREATE UNIQUE NONCLUSTERED INDEX [$PrimaryKeyFromUniqueIndex] ON [$ArchiveSchemaName].[$Table] ($pkColList);" -ErrorAction Stop -EnableException -As PSObject | Out-Null
+					$convParams['PrimaryKeyFromUniqueIndex'] = $PrimaryKeyFromUniqueIndex
+				}
+				Invoke-sqmTablePartitionConversion @convParams | Out-Null
+			}
+			catch
+			{
+				# Die Kopie ist leer und gerade erst entstanden: wieder entfernen, sonst wuerde ein
+				# erneuter Aufruf sie als "vorhanden" ansehen und die Anlage ueberspringen.
+				$convError = $_.Exception.Message
+				try
+				{
+					Invoke-DbaQuery @connParams -Database $ArchiveDatabaseName -Query "IF OBJECT_ID(N'[$ArchiveSchemaName].[$Table]') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM [$ArchiveSchemaName].[$Table]) DROP TABLE [$ArchiveSchemaName].[$Table];" -ErrorAction Stop -EnableException -As PSObject | Out-Null
+					Invoke-sqmLogging -Message "Anlage der Archiv-Kopie fehlgeschlagen - leere Kopie '$ArchiveDatabaseName.$ArchiveSchemaName.$Table' wieder entfernt." -FunctionName $functionName -Level "WARNING"
+				}
+				catch
+				{
+					Invoke-sqmLogging -Message "Leere Archiv-Kopie '$ArchiveDatabaseName.$ArchiveSchemaName.$Table' konnte nicht entfernt werden: $($_.Exception.Message) - vor einem erneuten Lauf von Hand loeschen." -FunctionName $functionName -Level "WARNING"
+				}
+				throw "Anlage/Partitionierung der Archiv-Kopie fehlgeschlagen: $convError"
+			}
+			Invoke-sqmLogging -Message "Archiv-Kopie '$ArchiveDatabaseName.$ArchiveSchemaName.$Table' partitioniert (Bereich $($srcRange.MinValue) - $($srcRange.MaxValue))$(if ($PrimaryKeyFromUniqueIndex) { ", PRIMARY KEY CLUSTERED aus '$PrimaryKeyFromUniqueIndex'" })." -FunctionName $functionName -Level "INFO"
 
 			if ($DataCompression -ne 'None')
 			{
@@ -543,6 +636,16 @@ WHERE i.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND c.name = N'$DateColumn'
 		else
 		{
 			Invoke-sqmLogging -Message "Archiv-Kopie '$ArchiveDatabaseName.$ArchiveSchemaName.$Table' existiert bereits - ueberspringe Anlage/Partitionierung." -FunctionName $functionName -Level "INFO"
+		}
+
+		if ($CreateArchiveTableOnly)
+		{
+			Invoke-sqmLogging -Message "-CreateArchiveTableOnly: Archiv-Kopie angelegt, keine Daten uebertragen." -FunctionName $functionName -Level "INFO"
+			return [PSCustomObject]@{
+				SchemaName = $Schema; TableName = $Table; ArchiveDatabaseName = $ArchiveDatabaseName
+				MonthsProcessed = 0; MonthsAlreadyDone = $completedPeriods.Count; TotalRowsArchived = 0
+				CutoverPerformed = $false; ArchiveTableCreated = $true; Status = 'ArchiveTableCreated'
+			}
 		}
 
 		# =========================================================================================
@@ -677,6 +780,7 @@ SELECT @RowsThisCall AS RowsThisCall, @MonthComplete AS MonthComplete;
 			RowsPurged          = $totalPurgedRows
 			ShrinkRunsPerformed = $shrinkRunsPerformed
 			CutoverPerformed    = $cutoverPerformed
+			ArchiveTableCreated = (-not $archiveExists)
 			Status              = 'Success'
 		}
 	}

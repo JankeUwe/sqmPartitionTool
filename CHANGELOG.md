@@ -1,5 +1,43 @@
 ﻿# sqmPartitionTool — Changelog
 
+## [1.12.0.0] — 2026-09-28
+
+### GUI: "Finish" no longer closes silently
+
+Execution was bound to the separate "Execute Now" button; "Finish" in the last step simply closed
+the wizard, without a message and without doing anything. If nothing has been executed yet,
+"Finish" now asks: Yes = execute now (the wizard stays open so the result and log stay visible,
+a second "Finish" closes it), No = close without executing, Cancel = stay.
+
+### GUI + `Invoke-sqmTableArchiveMigration`: create the archive table only, or create and transfer
+
+- New `-CreateArchiveTableOnly`: creates the partitioned archive copy and stops, no data transfer.
+  A later call without the switch transfers into the then existing table. Not combinable with
+  `-PurgeSourceAfterArchive`/`-CutoverToArchiveView`.
+- New `-PrimaryKeyFromUniqueIndex`: `SELECT INTO` does not copy indexes, so the archive copy so far
+  had no unique key at all (only a non-unique clustered index on the date column). The named unique
+  index of the source is now recreated on the empty copy and turned into the clustered PRIMARY KEY
+  on the partition scheme. Without `-KeyColumn` its key columns are used as key columns.
+- If creating/partitioning the archive copy fails, the just created empty copy is dropped again;
+  before, a rerun saw it as "existing" and filled it unpartitioned. An existing archive table that is
+  not partitioned is now rejected with a clear message.
+- GUI step "Archive & Retention", mode "Migrate to archive database now": radio buttons "Create the
+  partitioned archive table only" / "Create the archive table AND transfer the data"; the primary
+  key option (pre-selected in this mode, the table is new); "delete archived months from the source"
+  and "cutover to a view" are now visible, deselectable checkboxes instead of being always on.
+  The summary warns when the archive table would get no unique key.
+
+### GUI: other fixes
+
+- Key column lists are larger (360 x 200 instead of 300 x 84).
+- Summary lists all checked key columns (verified with 5 columns by driving the real wizard).
+- Status lines showed " table(s) found." without a number when exactly one table, database or
+  column was found (PowerShell 5.1: a single object has no `.Count`).
+
+Verified on DEV01 by running the unmodified wizard code with scripted input (message boxes
+answered automatically) against a CARCHIVE-shaped heap: create-only with PK, create + transfer with
+5 explicitly checked key columns (900/900 rows), and "Finish" -> "No".
+
 ## [1.11.0.0] — 2026-09-28
 
 ### New: `-PrimaryKeyFromUniqueIndex` — turn a heap's unique index into the clustered PK on the partition scheme

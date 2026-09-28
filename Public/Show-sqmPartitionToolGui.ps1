@@ -369,7 +369,7 @@
             $cmb0Database.Items.Clear()
             foreach ($d in $dbs) { [void]$cmb0Database.Items.Add($d.Name) }
             if ($cmb0Database.Items.Count -gt 0) { $cmb0Database.SelectedIndex = 0 }
-            Set-Status "$($dbs.Count) database(s) found." 'OK'
+            Set-Status "$(@($dbs).Count) database(s) found." 'OK'
         }
         catch { Set-Status "Error: $($_.Exception.Message)" 'Error' }
     })
@@ -411,7 +411,7 @@
                 $rowIdx = $grid1.Rows.Add($t.SchemaName, $t.TableName, $t.RowCount, (_FormatDisplayValue $t.SizeMB), $(if ($t.IsHeap) { 'Heap' } else { 'Clustered' }), $status)
                 if ($t.IsPartitioned) { $grid1.Rows[$rowIdx].DefaultCellStyle.ForeColor = $cDim }
             }
-            Set-Status "$($tables.Count) table(s) found." 'OK'
+            Set-Status "$(@($tables).Count) table(s) found." 'OK'
         }
         catch { Set-Status "Error: $($_.Exception.Message)" 'Error' }
     }
@@ -450,7 +450,7 @@
                 $rowIdx = $grid2.Rows.Add($c.ColumnName, $c.DataType, $(if ($c.IsNullable) { 'Yes' } else { 'No' }), $(if ($c.IsPartitionTypeCompatible) { 'Yes' } else { 'No' }))
                 if (-not $c.IsPartitionTypeCompatible) { $grid2.Rows[$rowIdx].DefaultCellStyle.ForeColor = $cDim }
             }
-            Set-Status "$($cols.Count) column(s) found. Incompatible types are grayed out." 'OK'
+            Set-Status "$(@($cols).Count) column(s) found. Incompatible types are grayed out." 'OK'
         }
         catch { Set-Status "Error: $($_.Exception.Message)" 'Error' }
     }
@@ -719,12 +719,42 @@
     $lbl6Key.ForeColor = $cDim
     $clb6Key = New-Object System.Windows.Forms.CheckedListBox
     $clb6Key.Location = New-Object System.Drawing.Point(24, 64)
-    $clb6Key.Size = New-Object System.Drawing.Size(300, 84)
+    $clb6Key.Size = New-Object System.Drawing.Size(360, 200)
     $clb6Key.BackColor = $cWindow
     $clb6Key.ForeColor = $cText
     $clb6Key.CheckOnClick = $true
     $toolTip6Key = New-Object System.Windows.Forms.ToolTip
     $toolTip6Key.SetToolTip($clb6Key, 'Check the column(s) that together uniquely identify a row (up to 5). Only shown because this table has no single clustered index/PK that could be used automatically.')
+
+    # Archivmodus: nur die partitionierte Archivtabelle anlegen, oder anlegen UND Daten uebertragen.
+    # Eigenes Panel, damit die beiden RadioButtons eine Gruppe fuer sich bilden.
+    $pn6Mode = New-Object System.Windows.Forms.Panel
+    $pn6Mode.Size = New-Object System.Drawing.Size(700, 50)
+    $rb6CreateOnly = New-Object System.Windows.Forms.RadioButton
+    $rb6CreateOnly.Text = 'Create the partitioned archive table only (no data transfer)'
+    $rb6CreateOnly.Location = New-Object System.Drawing.Point(0, 0)
+    $rb6CreateOnly.AutoSize = $true
+    $rb6CreateOnly.ForeColor = $cText
+    $rb6Transfer = New-Object System.Windows.Forms.RadioButton
+    $rb6Transfer.Text = 'Create the archive table AND transfer the data'
+    $rb6Transfer.Location = New-Object System.Drawing.Point(0, 24)
+    $rb6Transfer.AutoSize = $true
+    $rb6Transfer.ForeColor = $cText
+    $rb6Transfer.Checked = $true
+    $pn6Mode.Controls.Add($rb6CreateOnly); $pn6Mode.Controls.Add($rb6Transfer)
+
+    # Nur bei Datenuebertragung. Vorbelegt wie bisher (die GUI hat beides bisher fest gesetzt),
+    # jetzt aber sichtbar und abwaehlbar.
+    $chk6Purge = New-Object System.Windows.Forms.CheckBox
+    $chk6Purge.Text = 'Delete each archived month from the source table (after row-count check)'
+    $chk6Purge.AutoSize = $true
+    $chk6Purge.ForeColor = $cText
+    $chk6Purge.Checked = $true
+    $chk6Cutover = New-Object System.Windows.Forms.CheckBox
+    $chk6Cutover.Text = 'When done: rename the source table and replace it by a view onto the archive'
+    $chk6Cutover.AutoSize = $true
+    $chk6Cutover.ForeColor = $cText
+    $chk6Cutover.Checked = $true
 
     $chk6Retention = New-Object System.Windows.Forms.CheckBox
     $chk6Retention.Text = 'Set up automatic maintenance (sliding-window extension + retention)'
@@ -826,7 +856,7 @@
     $lbl6CopyKey.ForeColor = $cDim
     $clb6CopyKey = New-Object System.Windows.Forms.CheckedListBox
     $clb6CopyKey.Location = New-Object System.Drawing.Point(24, 144)
-    $clb6CopyKey.Size = New-Object System.Drawing.Size(300, 84)
+    $clb6CopyKey.Size = New-Object System.Drawing.Size(360, 200)
     $clb6CopyKey.BackColor = $cWindow
     $clb6CopyKey.ForeColor = $cText
     $clb6CopyKey.CheckOnClick = $true
@@ -846,6 +876,7 @@
     $p6.Controls.Add($chk6Pk)
 
     $p6.Controls.Add($chk6MigrateNow)
+    $p6.Controls.Add($pn6Mode); $p6.Controls.Add($chk6Purge); $p6.Controls.Add($chk6Cutover)
     $p6.Controls.Add($lbl6Key); $p6.Controls.Add($clb6Key)
     $p6.Controls.Add($chk6Retention)
     $p6.Controls.Add($lbl6a); $p6.Controls.Add($num6Retention); $p6.Controls.Add($cmb6Unit)
@@ -937,6 +968,7 @@ ORDER BY ic.key_ordinal
     # -PrimaryKeyFromUniqueIndex vor jeder Aenderung prueft. Bei mehreren gewinnt der schmalste.
     $script:step6PkCandidate = $null
     $script:step6PkChecked = $false
+    $script:executionDone = $false
     function Test-Step6PkCandidate
     {
         if ($script:step6PkChecked) { return }
@@ -976,7 +1008,7 @@ ORDER BY KeyCount, i.index_id
     }
     function Test-Step6PkActive
     {
-        (-not $script:wiz.SourceIsPartitioned) -and (-not $chk6MigrateNow.Checked) -and $script:step6PkCandidate -and $chk6Pk.Checked
+        (-not $script:wiz.SourceIsPartitioned) -and [bool]$script:step6PkCandidate -and $chk6Pk.Checked
     }
 
     # Ob die jeweilige Schluesselliste gilt, NICHT ueber .Visible abfragen: WinForms liefert fuer
@@ -985,7 +1017,8 @@ ORDER BY KeyCount, i.index_id
     # stillschweigend ignoriert und -KeyColumn nie uebergeben.
     function Test-Step6KeyListActive
     {
-        (-not $script:wiz.SourceIsPartitioned) -and $chk6MigrateNow.Checked -and $script:step6KeyColumnNeeded
+        # Mit PK aus dem eindeutigen Index sind die Schluesselspalten dessen Spalten - keine Auswahl noetig
+        (-not $script:wiz.SourceIsPartitioned) -and $chk6MigrateNow.Checked -and $script:step6KeyColumnNeeded -and -not (Test-Step6PkActive)
     }
     function Test-Step6CopyKeyListActive
     {
@@ -1007,7 +1040,14 @@ ORDER BY KeyCount, i.index_id
         $lbl6CopyKey.Visible = $showCopyKey; $clb6CopyKey.Visible = $showCopyKey
 
         if (-not $copyMode) { Test-Step6PkCandidate }
-        $chk6Pk.Visible = (-not $copyMode) -and (-not $migrateNow) -and [bool]$script:step6PkCandidate
+        $chk6Pk.Visible = (-not $copyMode) -and [bool]$script:step6PkCandidate
+        if ($script:step6PkCandidate)
+        {
+            $chk6Pk.Text = "Make unique index '$($script:step6PkCandidate.IndexName)' ($($script:step6PkCandidate.KeyColumns)) the clustered PRIMARY KEY$(if ($migrateNow) { ' of the archive table' })"
+        }
+        $pn6Mode.Visible = $migrateNow
+        $chk6Purge.Visible = $migrateNow -and $rb6Transfer.Checked
+        $chk6Cutover.Visible = $migrateNow -and $rb6Transfer.Checked
 
         if ($copyMode)
         {
@@ -1019,7 +1059,7 @@ ORDER BY KeyCount, i.index_id
 
         # --- Ablaufplan A/B/C: unveraendertes bisheriges Verhalten --------------------------------
         if ($migrateNow) { Test-Step6KeyColumnNeed }
-        $showKey = $migrateNow -and $script:step6KeyColumnNeeded
+        $showKey = [bool](Test-Step6KeyListActive)
 
         $lbl6Key.Visible = $showKey; $clb6Key.Visible = $showKey
 
@@ -1034,19 +1074,40 @@ ORDER BY KeyCount, i.index_id
         # Retention-Modus (dort variiert die Y-Position nicht mit dem Inhalt darueber).
         if ($migrateNow)
         {
-            $y = if ($showKey) { 156 } else { 40 }
+            # Von oben nach unten: Archiv-DB, Modus, PK-Option, Schluesselliste, Loeschen/Cutover
+            $y = 40
             $lbl6b.Location = New-Object System.Drawing.Point(24, ($y + 4))
             $txt6ArchiveDb.Location = New-Object System.Drawing.Point(170, $y)
+            $y += 36
+            $pn6Mode.Location = New-Object System.Drawing.Point(24, $y)
+            $y += 56
+            if ($chk6Pk.Visible) { $chk6Pk.Location = New-Object System.Drawing.Point(24, $y); $y += 30 }
+            if ($showKey)
+            {
+                $lbl6Key.Location = New-Object System.Drawing.Point(24, $y)
+                $clb6Key.Location = New-Object System.Drawing.Point(24, ($y + 24))
+                $y += 24 + $clb6Key.Height + 10
+            }
+            $chk6Purge.Location = New-Object System.Drawing.Point(24, $y)
+            $chk6Cutover.Location = New-Object System.Drawing.Point(24, ($y + 26))
         }
         else
         {
+            $chk6Pk.Location = New-Object System.Drawing.Point(4, 184)
             $lbl6b.Location = New-Object System.Drawing.Point(44, 144)
             $txt6ArchiveDb.Location = New-Object System.Drawing.Point(170, 140)
         }
     }
-    $chk6MigrateNow.Add_CheckedChanged({ Set-Step6Mode })
+    $chk6MigrateNow.Add_CheckedChanged({
+        # Im Archivmodus entsteht die Tabelle neu - der PK aus dem eindeutigen Index ist dort ohne
+        # Risiko und vorausgewaehlt. Bei der Umwandlung der bestehenden Tabelle bleibt er Opt-in.
+        if ($script:step6PkCandidate) { $chk6Pk.Checked = $chk6MigrateNow.Checked }
+        Set-Step6Mode
+    })
     $chk6Retention.Add_CheckedChanged({ Set-Step6Mode })
     $chk6Archive.Add_CheckedChanged({ Set-Step6Mode })
+    $rb6Transfer.Add_CheckedChanged({ Set-Step6Mode })
+    $chk6Pk.Add_CheckedChanged({ Set-Step6Mode })
     Set-Step6Mode
 
     # ===================================================================================
@@ -1121,12 +1182,33 @@ ORDER BY KeyCount, i.index_id
         }
         if ($chk6MigrateNow.Checked)
         {
-            $lines.Add("Mode                 : Migrate to archive database NOW -> '$($txt6ArchiveDb.Text.Trim())'")
-            if ((Test-Step6KeyListActive) -and $clb6Key.CheckedItems.Count -gt 0) { $lines.Add("Key Column(s)        : $(($clb6Key.CheckedItems | ForEach-Object { $_ }) -join ', ') (explicit)") }
+            $arcDb = $txt6ArchiveDb.Text.Trim()
+            $lines.Add("Mode                 : Archive database '$arcDb' - $(if ($rb6CreateOnly.Checked) { 'CREATE archive table only (no data transfer)' } else { 'CREATE archive table and TRANSFER data' })")
+            $lines.Add("Archive Table        : $arcDb.$($script:wiz.SchemaName).$($script:wiz.TableName), partitioned on $($script:wiz.PartitionColumn) (skipped if it already exists)")
+            if (Test-Step6PkActive)
+            {
+                $lines.Add("Primary Key          : from '$($script:step6PkCandidate.IndexName)', CLUSTERED on the partition scheme")
+                $lines.Add("Key Column(s)        : $($script:step6PkCandidate.KeyColumns) (from the primary key)")
+            }
+            elseif ((Test-Step6KeyListActive) -and $clb6Key.CheckedItems.Count -gt 0)
+            {
+                $lines.Add("Key Column(s)        : $(@($clb6Key.CheckedItems | ForEach-Object { [string]$_ }) -join ', ') (explicit, $($clb6Key.CheckedItems.Count) column(s))")
+            }
+            elseif (Test-Step6KeyListActive) { $lines.Add('Key Column(s)        : NONE CHECKED - required for this table') }
             else { $lines.Add('Key Column(s)        : (auto-derive from clustered index/PK)') }
-            $lines.Add('                       Source table will be renamed and replaced by a view onto the')
-            $lines.Add('                       archive copy once all closed periods are migrated (current,')
-            $lines.Add('                       still-open period stays behind in the renamed table).')
+            if ($script:wiz.IsHeap -and -not (Test-Step6PkActive))
+            {
+                $lines.Add("WARNING              : the archive table gets NO unique key (only a non-unique clustered index on $($script:wiz.PartitionColumn))$(if ($script:step6PkCandidate) { " - check the primary key option in step 7/8" })")
+            }
+            if ($rb6Transfer.Checked)
+            {
+                $lines.Add("Delete from source   : $(if ($chk6Purge.Checked) { 'Yes, each month after its row-count check' } else { 'No, source stays unchanged' })")
+                $lines.Add("Cutover to view      : $(if ($chk6Cutover.Checked) { 'Yes - source renamed and replaced by a view (current month stays in the renamed table)' } else { 'No' })")
+            }
+            else
+            {
+                $lines.Add('Data                 : not transferred - run the wizard again with "create and transfer" later')
+            }
         }
         else
         {
@@ -1198,6 +1280,7 @@ ORDER BY KeyCount, i.index_id
                 $result = Copy-sqmPartitionedTable @cp @copyParams
                 Add-Log "Copy completed: $($result.RowsCopied) row(s) copied, $($result.RowsVerified) row(s) verified in target, status $($result.Status)."
                 Add-Log 'DONE.'
+                $script:executionDone = $true
                 [System.Windows.Forms.MessageBox]::Show("'$($script:wiz.SchemaName).$($script:wiz.TableName)' was copied successfully to '$($txt6TargetDb.Text.Trim())'.", 'Success', 'OK', 'Information') | Out-Null
             }
             catch
@@ -1219,7 +1302,16 @@ ORDER BY KeyCount, i.index_id
 
         $confirmText = if ($migrateNow)
         {
-            "Migrate '$($script:wiz.SchemaName).$($script:wiz.TableName)' to archive database '$($txt6ArchiveDb.Text.Trim())' now?`n`nThe source table will be renamed and replaced by a view once all closed periods are migrated."
+            if ($rb6CreateOnly.Checked)
+            {
+                "Create the partitioned archive table '$($txt6ArchiveDb.Text.Trim()).$($script:wiz.SchemaName).$($script:wiz.TableName)' now?`n`nNo data is transferred, the source table is not changed."
+            }
+            else
+            {
+                "Transfer '$($script:wiz.SchemaName).$($script:wiz.TableName)' to archive database '$($txt6ArchiveDb.Text.Trim())' now?" +
+                $(if ($chk6Purge.Checked) { "`n`n- Archived months are DELETED from the source table." } else { "`n`n- The source table stays unchanged." }) +
+                $(if ($chk6Cutover.Checked) { "`n- When done, the source table is renamed and replaced by a view." } else { '' })
+            }
         }
         else
         {
@@ -1249,13 +1341,18 @@ ORDER BY KeyCount, i.index_id
                     FutureBufferPeriods     = $script:wiz.FutureBufferPeriods
                     DataCompression         = $script:wiz.DataCompression
                     AllowKeyChange          = $true
-                    PurgeSourceAfterArchive = $true
-                    CutoverToArchiveView    = $true
                     Confirm                 = $false
                     ErrorAction             = 'Stop'
                     EnableException         = $true
                 }
                 if ($script:wiz.BoundaryType) { $archParams['BoundaryType'] = $script:wiz.BoundaryType; $archParams['SurrogateDateFormat'] = $script:wiz.SurrogateDateFormat }
+                if ($rb6CreateOnly.Checked) { $archParams['CreateArchiveTableOnly'] = $true }
+                else
+                {
+                    if ($chk6Purge.Checked) { $archParams['PurgeSourceAfterArchive'] = $true }
+                    if ($chk6Cutover.Checked) { $archParams['CutoverToArchiveView'] = $true }
+                }
+                if (Test-Step6PkActive) { $archParams['PrimaryKeyFromUniqueIndex'] = $script:step6PkCandidate.IndexName }
                 $keyCount = $clb6Key.CheckedItems.Count
                 if ((Test-Step6KeyListActive) -and $keyCount -ge 1 -and $keyCount -le 5)
                 {
@@ -1268,9 +1365,19 @@ ORDER BY KeyCount, i.index_id
                     $btnBack.Enabled = $true
                     return
                 }
+                if ($archParams['KeyColumn']) { Add-Log "Key columns: $($archParams['KeyColumn'] -join ', ')" }
                 $result = Invoke-sqmTableArchiveMigration @cp @archParams
+                if ($rb6CreateOnly.Checked)
+                {
+                    Add-Log "Archive table: status $($result.Status)$(if ($result.Status -eq 'ArchiveTableExists') { ' (already existed, nothing created)' })."
+                    Add-Log 'DONE.'
+                    $script:executionDone = $true
+                    [System.Windows.Forms.MessageBox]::Show("Archive table '$($txt6ArchiveDb.Text.Trim()).$($script:wiz.SchemaName).$($script:wiz.TableName)': $($result.Status).`n`nNo data was transferred.", 'Success', 'OK', 'Information') | Out-Null
+                    return
+                }
                 Add-Log "Migration completed: $($result.MonthsProcessed) month(s) processed, $($result.TotalRowsArchived) row(s) archived, $($result.RowsPurged) row(s) purged from source, status $($result.Status)."
-                if ($result.CutoverPerformed)
+                if (-not $chk6Cutover.Checked) { Add-Log 'Cutover not requested - the source table stays in place.' }
+                elseif ($result.CutoverPerformed)
                 {
                     Add-Log "Cutover done: '$($script:wiz.SchemaName).$($script:wiz.TableName)' is now a view onto the archive copy. The renamed original table was kept, not dropped - check the log for its name and any residual (not-yet-archived) rows before dropping it."
                 }
@@ -1280,6 +1387,7 @@ ORDER BY KeyCount, i.index_id
                 }
 
                 Add-Log 'DONE.'
+                $script:executionDone = $true
                 [System.Windows.Forms.MessageBox]::Show("'$($script:wiz.SchemaName).$($script:wiz.TableName)' migration to '$($txt6ArchiveDb.Text.Trim())' completed.", 'Success', 'OK', 'Information') | Out-Null
             }
             catch
@@ -1357,6 +1465,7 @@ ORDER BY KeyCount, i.index_id
             }
 
             Add-Log 'DONE.'
+            $script:executionDone = $true
             [System.Windows.Forms.MessageBox]::Show("'$($script:wiz.SchemaName).$($script:wiz.TableName)' was partitioned successfully.", 'Success', 'OK', 'Information') | Out-Null
         }
         catch
@@ -1451,7 +1560,18 @@ ORDER BY KeyCount, i.index_id
             4 { Load-Step5; return $true }
             5 { return $true }
             6 { Load-Step7; return $true }
-            7 { $form.Close(); return $false }
+            7 {
+                # Finish hat frueher nur geschlossen - wer "Execute Now" uebersehen hat, verlor den
+                # ganzen Assistenten ohne jede Meldung.
+                if (-not $script:executionDone)
+                {
+                    $ans = [System.Windows.Forms.MessageBox]::Show("Nothing has been executed yet.`n`nYes = execute now`nNo = close without executing`nCancel = stay in the wizard", 'Finish', 'YesNoCancel', 'Question')
+                    if ($ans -eq 'Yes') { $btn7Execute.PerformClick() }
+                    elseif ($ans -eq 'No') { $form.Close() }
+                    return $false
+                }
+                $form.Close(); return $false
+            }
         }
         return $true
     }
