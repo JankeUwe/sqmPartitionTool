@@ -11,7 +11,7 @@
 	RootModule             = 'sqmPartitionTool.psm1'
 
 	# Version number of this module.
-	ModuleVersion          = '1.15.0.0'
+	ModuleVersion          = '1.15.1.0'
 
 	# ID used to uniquely identify this module
 	GUID                   = 'dea1027c-a846-4dbe-8d25-6a4416525e06'
@@ -49,7 +49,7 @@
 	# PowerShell-Funktionen) angekuendigt und wird vermutlich Rueckgabeobjekte/Verhalten aendern.
 	# Cap verhindert, dass ein Update-Module dbatools stillschweigend auf eine inkompatible
 	# Major-Version springt, bevor das hier getestet und freigegeben ist.
-	RequiredModules        = @(@{ ModuleName = 'dbatools'; MaximumVersion = '2.999.999' }, @{ ModuleName = 'sqmSQLTool'; ModuleVersion = '1.9.2.0' }, @{ ModuleName = 'sqmDataTransfer'; ModuleVersion = '0.1.22.0' })
+	RequiredModules        = @(@{ ModuleName = 'dbatools'; MaximumVersion = '2.999.999' }, @{ ModuleName = 'sqmSQLTool'; ModuleVersion = '1.9.2.0' }, @{ ModuleName = 'sqmDataTransfer'; ModuleVersion = '0.1.23.0' })
 
 	# Assemblies that must be loaded prior to importing this module
 	RequiredAssemblies     = @()

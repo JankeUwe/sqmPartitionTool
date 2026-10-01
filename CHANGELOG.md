@@ -1,5 +1,29 @@
 ﻿# sqmPartitionTool — Changelog
 
+## [1.15.1.0] — 2026-10-01
+
+### Archive migration and re-partitioned copy read each chunk by index seek
+
+Each month (archive migration) or target partition (copy) is read with
+`SELECT * FROM <source> WHERE <range>`. On a heap, or a clustered index that does not lead with the
+date/partition column, SQL Server answers that with a full table scan on large tables, even when a
+nonclustered index on the column exists: every month read the whole source table, and while the
+scan passed other months' rows the archive's INSERT BULK session waited on `ASYNC_NETWORK_IO`.
+Same rule as sqmDataTransfer 0.1.23.0 `-SourceAccess Auto`: with an index leading with the column
+and at least 4 chunks, each chunk is read `WITH (FORCESEEK)` (after a `TOP (0)` probe, otherwise
+scan with a warning). `Copy-sqmPartitionedTable` only does this when the new partition column
+differs from the source's (otherwise partition elimination already limits the read).
+Verified on DEV01: archive migration of a heap with an index on the date column, all month reads
+with FORCESEEK, source and archive identical; copy with the same partition column correctly
+without hint.
+
+### Requires sqmDataTransfer >= 0.1.23.0 (connection leak)
+
+The copy engine left one connection open per chunk until the process ended; after about 100
+chunks (months or partitions) the connection pool was exhausted and further chunks failed after a
+15-second wait. Fixed in sqmDataTransfer 0.1.23.0, now the minimum version (manifest and
+installer check).
+
 ## [1.15.0.0] — 2026-10-01
 
 ### Datenuebertragung ueber die Kopierroutinen von sqmDataTransfer

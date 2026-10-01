@@ -430,6 +430,33 @@ WHERE i.object_id = OBJECT_ID(N'[$TargetSchemaName].[$TargetTableName]') AND i.i
 		$toCopy = @(1..$partCount | Where-Object { $s = if ($srcCountByPart.ContainsKey($_)) { $srcCountByPart[$_] } else { 0 }; $d = if ($dstCountByPart.ContainsKey($_)) { $dstCountByPart[$_] } else { 0 }; $s -ne $d })
 		Write-Host "[$(Get-Date -Format 'HH:mm:ss')] $partCount partition(s), $($toCopy.Count) to copy, $($partCount - $toCopy.Count) already complete or empty."
 
+		# Partition je Chunk per Index-Seek lesen, wenn die NEUE Partitionsspalte nicht die
+		# Partitionsspalte der Quelle ist (dann greift keine Partition Elimination) und die Quelle
+		# einen Index mit dieser Spalte vorne hat - sonst liest jeder Chunk die ganze Quelltabelle
+		# (gleiche Regel wie Invoke-sqmChunkedTableTransfer -SourceAccess Auto).
+		$sourceHint = ''
+		if ($PartitionColumn -ne $srcPart.PartitionColumn -and $toCopy.Count -ge 4)
+		{
+			$seekIdx = @(Invoke-DbaQuery @connParams -Database $Database -ErrorAction Stop -EnableException -As PSObject -Query @"
+SELECT TOP (1) i.index_id, i.name
+FROM sys.indexes i
+JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.key_ordinal = 1
+JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+WHERE i.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND i.is_disabled = 0 AND i.type IN (1, 2) AND i.has_filter = 0 AND c.name = N'$PartitionColumn'
+ORDER BY i.index_id
+"@) | Select-Object -First 1
+			if ($seekIdx -and [int]$seekIdx.index_id -ne 1)
+			{
+				try
+				{
+					Invoke-DbaQuery @connParams -Database $Database -Query "SELECT TOP (0) * FROM [$Schema].[$Table] WITH (FORCESEEK) WHERE $(_PartitionPredicate $toCopy[0])" -ErrorAction Stop -EnableException | Out-Null
+					$sourceHint = ' WITH (FORCESEEK)'
+					Invoke-sqmLogging -Message "Partitionen werden per Index-Seek ueber '$($seekIdx.name)' aus der Quelle gelesen." -FunctionName $functionName -Level "INFO"
+				}
+				catch { Invoke-sqmLogging -Message "Seek ueber '$($seekIdx.name)' nicht moeglich ($($_.Exception.Message)) - Scan je Partition." -FunctionName $functionName -Level "WARNING" }
+			}
+		}
+
 		$sw = [System.Diagnostics.Stopwatch]::StartNew()
 		$totalCopied = 0
 		$timeBudgetHit = $false
@@ -463,7 +490,7 @@ WHERE i.object_id = OBJECT_ID(N'[$TargetSchemaName].[$TargetTableName]') AND i.i
 			}
 
 			$partWatch = [System.Diagnostics.Stopwatch]::StartNew()
-			$copyResult = @(Copy-sqmTableData @copyBase -SourceQuery "SELECT * FROM [$Schema].[$Table] WHERE $predicate") | Select-Object -First 1
+			$copyResult = @(Copy-sqmTableData @copyBase -SourceQuery "SELECT * FROM [$Schema].[$Table]$sourceHint WHERE $predicate") | Select-Object -First 1
 			$partWatch.Stop()
 			if (-not $copyResult -or $copyResult.Status -ne 'Success') { throw "Partition $k konnte nicht kopiert werden: $(if ($copyResult) { $copyResult.Message } else { 'kein Ergebnis von Copy-sqmTableData' })" }
 			$rows = [int64]$copyResult.RowsCopied

@@ -796,6 +796,35 @@ WHERE i.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND c.name = N'$DateColumn'
 			foreach ($r in @(Invoke-DbaQuery @connParams -Database $Database -Query "SELECT $bucketExpr AS P, COUNT_BIG(*) AS Cnt FROM $archiveFqn WHERE $rangePredicate GROUP BY $bucketExpr;" -QueryTimeout 0 -ErrorAction Stop -EnableException -As PSObject)) { $dstCountByPeriod[[int]$r.P] = [int64]$r.Cnt }
 		}
 
+		# Monats-Chunk per Index-Seek statt Table Scan lesen (gleiche Regel wie
+		# Invoke-sqmChunkedTableTransfer -SourceAccess Auto): auf einem Heap bzw. einem Clustered Index,
+		# der nicht mit der Datumsspalte beginnt, liest SQL Server fuer "WHERE <Monat>" bei grossen
+		# Tabellen sonst die GANZE Tabelle je Monat. Waehrend der Scan Seiten anderer Monate liest, kommt
+		# beim Client nichts an und die INSERT-BULK-Session im Archiv wartet auf ASYNC_NETWORK_IO.
+		$sourceHint = ''
+		$seekIdx = @(Invoke-DbaQuery @connParams -Database $Database -ErrorAction Stop -EnableException -As PSObject -Query @"
+SELECT TOP (1) i.index_id, i.name
+FROM sys.indexes i
+JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.key_ordinal = 1
+JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+WHERE i.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND i.is_disabled = 0 AND i.type IN (1, 2) AND i.has_filter = 0 AND c.name = N'$DateColumn'
+ORDER BY i.index_id
+"@) | Select-Object -First 1
+		if ($seekIdx -and [int]$seekIdx.index_id -ne 1 -and $totalPeriodsToProcess -ge 4)
+		{
+			try
+			{
+				$probe = _PeriodPredicate $pendingPeriods[0] (_NextPeriod $pendingPeriods[0])
+				Invoke-DbaQuery @connParams -Database $Database -Query "SELECT TOP (0) * FROM [$Schema].[$Table] WITH (FORCESEEK) WHERE $probe" -ErrorAction Stop -EnableException | Out-Null
+				$sourceHint = ' WITH (FORCESEEK)'
+				Invoke-sqmLogging -Message "Monats-Chunks werden per Index-Seek ueber '$($seekIdx.name)' gelesen statt per Scan der ganzen Tabelle je Monat." -FunctionName $functionName -Level "INFO"
+			}
+			catch
+			{
+				Invoke-sqmLogging -Message "Seek ueber '$($seekIdx.name)' nicht moeglich ($($_.Exception.Message)) - Monate werden per Scan gelesen." -FunctionName $functionName -Level "WARNING"
+			}
+		}
+
 		$copyBase = @{
 			Source              = $SqlInstance
 			SourceDatabase      = $Database
@@ -863,7 +892,7 @@ IF @@ROWCOUNT = 0 INSERT dbo.sqm_ArchiveMonthLog (SchemaName, TableName, Archive
 			}
 
 			$periodWatch = [System.Diagnostics.Stopwatch]::StartNew()
-			$copyResult = @(Copy-sqmTableData @copyBase -SourceQuery "SELECT * FROM [$Schema].[$Table] WHERE $predicate") | Select-Object -First 1
+			$copyResult = @(Copy-sqmTableData @copyBase -SourceQuery "SELECT * FROM [$Schema].[$Table]$sourceHint WHERE $predicate") | Select-Object -First 1
 			$periodWatch.Stop()
 			if (-not $copyResult -or $copyResult.Status -ne 'Success') { throw "Monat $period konnte nicht kopiert werden: $(if ($copyResult) { $copyResult.Message } else { 'kein Ergebnis von Copy-sqmTableData' })" }
 

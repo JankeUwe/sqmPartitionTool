@@ -38,7 +38,7 @@ mit den Kopierroutinen von [sqmDataTransfer](https://github.com/JankeUwe/sqmData
 - PowerShell 5.1+
 - Modul `dbatools`
 - Modul `sqmSQLTool`
-- Modul `sqmDataTransfer` (ab 0.1.22.0)
+- Modul `sqmDataTransfer` (ab 0.1.23.0)
 
 ## Installation
 

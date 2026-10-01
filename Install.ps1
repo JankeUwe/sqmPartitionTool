@@ -157,7 +157,7 @@ if ($Scope -eq 'AllUsers') {
 # ---------------------------------------------------------------------------
 $sqmDependencies = @(
     @{ Name = 'sqmSQLTool';      MinVersion = [version]'1.9.2.0';  Purpose = 'Logging, WinForms-Theme, SA-Login-Ermittlung' }
-    @{ Name = 'sqmDataTransfer'; MinVersion = [version]'0.1.22.0'; Purpose = 'Kopierroutinen (SqlBulkCopy) fuer Archiv-Migration, Copy und Relocation' }
+    @{ Name = 'sqmDataTransfer'; MinVersion = [version]'0.1.23.0'; Purpose = 'Kopierroutinen (SqlBulkCopy) fuer Archiv-Migration, Copy und Relocation' }
 )
 $missingDeps = @()
 foreach ($dep in $sqmDependencies) {

@@ -8,7 +8,7 @@ Zielgruppe dieses Handbuchs: SQL-Server-DBAs, die das Tool operativ einsetzen (n
 Entwicklung des Moduls selbst). Fuer die Versionshistorie siehe [CHANGELOG.md](../CHANGELOG.md),
 fuer eine Kurzuebersicht [README.md](../README.md).
 
-Stand: 2026-10-01, sqmPartitionTool 1.15.0.0 (mit sqmDataTransfer 0.1.22.0).
+Stand: 2026-10-01, sqmPartitionTool 1.15.1.0 (mit sqmDataTransfer 0.1.23.0).
 
 ---
 
@@ -54,7 +54,7 @@ soll (kein Cutover, keine Umbenennung) → D.
 
 - PowerShell 5.1 oder hoeher (GUI benoetigt Desktop-CLR/WinForms, unter PowerShell 7 auf Windows
   weiterhin verfuegbar, nicht aber auf PowerShell 7 unter Linux/macOS).
-- Module `dbatools`, `sqmSQLTool` (>= 1.9.2.0) und **`sqmDataTransfer` (>= 0.1.22.0)**.
+- Module `dbatools`, `sqmSQLTool` (>= 1.9.2.0) und **`sqmDataTransfer` (>= 0.1.23.0)**.
   sqmDataTransfer liefert seit 1.15.0.0 die Kopier-Engine fuer Ablaufplan C, D und die Relocation
   (siehe Abschnitt 5b). sqmSQLTool und sqmDataTransfer liegen nicht auf der PowerShell Gallery und
   muessen **vorher** installiert werden.
@@ -347,6 +347,11 @@ Was die Engine mitbringt:
   Chunks noch uebers Netz zu lesen.
 - Batchgroesse bei Columnstore-Zielen automatisch gedeckelt.
 - Fortschritt je Chunk (`Write-Progress`) plus eine Konsolenzeile mit Zeilen/s.
+- **Lesen per Index-Seek statt Scan je Chunk** (seit 1.15.1.0): auf einem Heap bzw. einem Clustered
+  Index, der nicht mit der Datums-/Partitionsspalte beginnt, liest SQL Server fuer
+  `WHERE <Monat>` sonst bei grossen Tabellen die ganze Tabelle je Chunk. Gibt es einen Index mit der
+  Spalte vorne und mindestens 4 Chunks, wird jeder Chunk `WITH (FORCESEEK)` gelesen. Ohne einen
+  solchen Index vor einem grossen Lauf einen anlegen.
 
 | Funktion | Ein Chunk ist | Fortsetzen nach Abbruch |
 |---|---|---|
@@ -368,6 +373,9 @@ Ueber den Client waeren beide nur ein zusaetzlicher Netzweg.
 
 - Den Lauf **auf dem SQL-Server-Host selbst** starten. SqlBulkCopy liest ueber den Client; von einer
   Workstation aus geht jede Zeile zweimal uebers Netz.
+- `ASYNC_NETWORK_IO` an der **schreibenden** Session (`INSERT BULK` im Ziel) heisst: das Ziel wartet
+  auf den Client, der Engpass liegt beim Lesen der Quelle oder im Client. Pruefen mit
+  `Docs/Diagnose-ChunkTransfer-Quelle.sql` aus sqmDataTransfer.
 - `ASYNC_NETWORK_IO` an der **lesenden** Session ist normal, solange das Schreiben langsamer ist als
   das Lesen. Der eigentliche Engpass zeigt sich an der **schreibenden** Session (`INSERT BULK`):
   `WRITELOG` bzw. Log-Wachstum (bei FULL Recovery wird jede Zeile protokolliert, Log vorher passend
@@ -440,7 +448,7 @@ Ladepfad.
 
 ## 8. Troubleshooting und bekannte Einschraenkungen
 
-- **Modul laedt nicht ("required module sqmDataTransfer")**: sqmDataTransfer >= 0.1.22.0 fehlt im
+- **Modul laedt nicht ("required module sqmDataTransfer")**: sqmDataTransfer >= 0.1.23.0 fehlt im
   selben Scope. Zuerst sqmDataTransfer installieren, dann sqmPartitionTool (Abschnitt 2).
 - **Die GUI verhaelt sich wie eine alte Version** (z.B. nur eine Schluesselspalte erlaubt): es
   laeuft eine aeltere installierte Kopie. Der Fenstertitel zeigt Version und Ladepfad;
