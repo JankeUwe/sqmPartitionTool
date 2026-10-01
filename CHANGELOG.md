@@ -1,5 +1,39 @@
 ﻿# sqmPartitionTool — Changelog
 
+## [1.13.0.0] — 2026-10-01
+
+### `Copy-sqmPartitionedTable` + GUI copy mode: composite keys with up to 5 columns
+
+Copying an already partitioned table into another database accepted only ONE key column; a table
+whose unique key has several columns could not be copied at all (GUI: "Please check exactly ONE Key
+Column").
+
+- `-KeyColumn` now takes 1 to 5 columns. Batches page through the key tuple
+  `(K1, K2, ...) > (v1, v2, ...)`; the resume point is the last real row (in key order) in the target,
+  not a column-wise MAX.
+- Without `-KeyColumn` the key is derived from a unique clustered index, PK or unique index with 1-5
+  NOT NULL columns (new private `Get-sqmCopyKeyColumn`, used by the GUI too). A single-column
+  non-unique clustered index still works as before, with a warning.
+- Key columns that contain NULL are rejected up front (those rows would never be copied).
+- The key is validated BEFORE the target table is created, so a wrong key leaves no empty target table.
+- Key literals are typed correctly: `datetime` (3 fractional digits, before: conversion error 241),
+  `bit`, `binary`, `nvarchar` (N''), `float`, culture-independent numbers.
+- GUI: the copy-mode key list allows 1-5 checked columns and passes all of them.
+
+### `Invoke-sqmTableArchiveMigration`: stale month log no longer skips months
+
+If the archive table had been dropped after an earlier run, `dbo.sqm_ArchiveMonthLog` still listed
+those months as "Completed" and they were silently NOT transferred into the newly created archive
+table (found on DEV01: 30 stale months, 3,620 test rows missing). If the archive table does not
+exist, all log rows for this table/archive database are now reset before it is created.
+
+### `New-sqmPartitionSchemeSet`: unused leftover function/scheme is recreated
+
+An existing partition function/scheme with the same name was always reused, whatever its
+boundaries. A leftover from an earlier run (2024-01..2025-03) put all 2026 rows into the last
+partition. If no index uses the function/scheme, it is now dropped and recreated with the current
+boundaries; one that is in use is still kept unchanged.
+
 ## [1.12.1.0] — 2026-09-28
 
 ### GUI: module version and load path in the window title

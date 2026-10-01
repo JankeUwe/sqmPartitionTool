@@ -99,12 +99,51 @@ SELECT
 
 	if ([int]$existing.FunctionExists -gt 0 -or [int]$existing.SchemeExists -gt 0)
 	{
-		Invoke-sqmLogging -Message "Partition Function '$pfName' und/oder Scheme '$psName' existieren bereits auf '$Database' - ueberspringe Erstellung." -FunctionName $functionName -Level "INFO"
-		return [PSCustomObject]@{
-			PartitionFunctionName = $pfName
-			PartitionSchemeName   = $psName
-			AlreadyExisted        = $true
-			PartitionCount        = $expectedPartitionCount
+		# Von keinem Index/keiner Tabelle benutzt = Ueberbleibsel eines frueheren Laufs (z.B. Tabelle
+		# danach geloescht). Dessen Grenzen passen meist nicht zu den aktuellen Daten - wiederverwendet
+		# landeten alle neueren Zeilen in der letzten Partition. Also verwerfen und neu anlegen.
+		$usageQuery = @"
+SELECT COUNT(*) AS UsedBy
+FROM sys.indexes i
+JOIN sys.partition_schemes ps ON ps.data_space_id = i.data_space_id
+LEFT JOIN sys.partition_functions pf ON pf.function_id = ps.function_id
+WHERE ps.name = N'$psName' OR pf.name = N'$pfName'
+"@
+		$usedBy = [int](Invoke-DbaQuery @connParams -Database $Database -Query $usageQuery -ErrorAction Stop -EnableException -As PSObject)[0].UsedBy
+		if ($usedBy -gt 0)
+		{
+			Invoke-sqmLogging -Message "Partition Function '$pfName' und/oder Scheme '$psName' existieren bereits auf '$Database' und werden benutzt - ueberspringe Erstellung." -FunctionName $functionName -Level "INFO"
+			return [PSCustomObject]@{
+				PartitionFunctionName = $pfName
+				PartitionSchemeName   = $psName
+				AlreadyExisted        = $true
+				PartitionCount        = $expectedPartitionCount
+			}
+		}
+
+		$dropAction = "Unbenutzte Partition Function '$pfName' / Scheme '$psName' verwerfen (werden mit aktuellen Grenzen neu angelegt)"
+		if ($PSCmdlet.ShouldProcess($Database, $dropAction))
+		{
+			# Alle (unbenutzten) Schemes auf dieser Function zuerst, sonst laesst sich die Function nicht loeschen
+			$dropSql = @"
+DECLARE @sql NVARCHAR(MAX) = N'';
+SELECT @sql += N'DROP PARTITION SCHEME ' + QUOTENAME(ps.name) + N';'
+FROM sys.partition_schemes ps LEFT JOIN sys.partition_functions pf ON pf.function_id = ps.function_id
+WHERE ps.name = N'$psName' OR pf.name = N'$pfName';
+IF EXISTS (SELECT 1 FROM sys.partition_functions WHERE name = N'$pfName') SET @sql += N'DROP PARTITION FUNCTION [$pfName];';
+EXEC sys.sp_executesql @sql;
+"@
+			Invoke-DbaQuery @connParams -Database $Database -Query $dropSql -ErrorAction Stop -EnableException | Out-Null
+			Invoke-sqmLogging -Message "$dropAction - erledigt." -FunctionName $functionName -Level "WARNING"
+		}
+		else
+		{
+			return [PSCustomObject]@{
+				PartitionFunctionName = $pfName
+				PartitionSchemeName   = $psName
+				AlreadyExisted        = $true
+				PartitionCount        = $expectedPartitionCount
+			}
 		}
 	}
 

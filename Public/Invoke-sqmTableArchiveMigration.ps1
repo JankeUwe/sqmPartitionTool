@@ -474,6 +474,18 @@ WHERE i.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND c.name = N'$DateColumn'
 		}
 		else { @() }
 
+		# Log-Eintraege ohne Archivtabelle sind veraltet (Archivtabelle wurde nach einem frueheren Lauf
+		# geloescht/umbenannt): als "Completed" gefuehrte Monate wuerden sonst in die NEU angelegte,
+		# leere Archivtabelle nie uebertragen - stiller Datenverlust. Hier nur im Speicher verwerfen;
+		# geloescht wird erst in Schritt 3, nach ShouldProcess.
+		$staleLogPeriods = @()
+		if (-not $archiveExists -and $completedPeriods.Count -gt 0)
+		{
+			$staleLogPeriods = $completedPeriods
+			$completedPeriods = @()
+			Invoke-sqmLogging -Message "'$ArchiveDatabaseName.$ArchiveSchemaName.$Table' existiert nicht, dbo.sqm_ArchiveMonthLog fuehrt aber $($staleLogPeriods.Count) Monat(e) als abgeschlossen ($(($staleLogPeriods | Measure-Object -Minimum).Minimum) - $(($staleLogPeriods | Measure-Object -Maximum).Maximum)) - veraltete Eintraege eines frueheren Laufs, werden zurueckgesetzt und die Monate erneut uebertragen." -FunctionName $functionName -Level "WARNING"
+		}
+
 		$rangeParams = @{ SqlInstance = $SqlInstance; Database = $Database; Schema = $Schema; Table = $Table; Column = $DateColumn }
 		if ($SqlCredential) { $rangeParams['SqlCredential'] = $SqlCredential }
 		$srcRange = Get-sqmPartitionColumnRange @rangeParams
@@ -554,6 +566,13 @@ WHERE i.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND c.name = N'$DateColumn'
 		# =========================================================================================
 		if (-not $archiveExists)
 		{
+			# Alle Log-Eintraege dieser Tabelle/Archiv-DB gehoeren zu einer nicht mehr existierenden
+			# Archivtabelle - auch 'InProgress' (deren Fortsetzpunkt wuerde den Monatsanfang ueberspringen).
+			if ($logTableExists)
+			{
+				$deleted = Invoke-DbaQuery @connParams -Database $Database -Query "DELETE FROM dbo.sqm_ArchiveMonthLog WHERE SchemaName = N'$Schema' AND TableName = N'$Table' AND ArchiveDatabaseName = N'$ArchiveDatabaseName'; SELECT @@ROWCOUNT AS Cnt;" -ErrorAction Stop -EnableException -As PSObject
+				if ([int]$deleted[0].Cnt -gt 0) { Invoke-sqmLogging -Message "$($deleted[0].Cnt) veraltete(n) Eintrag/Eintraege aus dbo.sqm_ArchiveMonthLog entfernt." -FunctionName $functionName -Level "WARNING" }
+			}
 			Invoke-DbaQuery @connParams -Database $Database -Query "IF SCHEMA_ID(N'$ArchiveSchemaName') IS NULL EXEC(N'CREATE SCHEMA [$ArchiveSchemaName]');" -ErrorAction Stop -EnableException -As PSObject | Out-Null
 			Invoke-DbaQuery @connParams -Database $Database -Query "SELECT * INTO [$ArchiveDatabaseName].[$ArchiveSchemaName].[$Table] FROM [$Schema].[$Table] WHERE 1 = 0;" -ErrorAction Stop -EnableException -As PSObject | Out-Null
 			Invoke-sqmLogging -Message "Leere Strukturkopie '$ArchiveDatabaseName.$ArchiveSchemaName.$Table' angelegt." -FunctionName $functionName -Level "INFO"
