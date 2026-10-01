@@ -8,20 +8,23 @@ Zielgruppe dieses Handbuchs: SQL-Server-DBAs, die das Tool operativ einsetzen (n
 Entwicklung des Moduls selbst). Fuer die Versionshistorie siehe [CHANGELOG.md](../CHANGELOG.md),
 fuer eine Kurzuebersicht [README.md](../README.md).
 
+Stand: 2026-10-01, sqmPartitionTool 1.15.0.0 (mit sqmDataTransfer 0.1.22.0).
+
 ---
 
 ## Inhalt
 
-1. [Ueberblick: welcher Workflow passt zu meiner Situation?](#1-ueberblick)
-2. [Voraussetzungen und Installation](#2-voraussetzungen-und-installation)
-3. [Ablaufplan A: Bestehende Tabelle in-place partitionieren](#3-ablaufplan-a-bestehende-tabelle-in-place-partitionieren)
-4. [Ablaufplan B: Automatische Wartung einrichten (Sliding-Window + Retention)](#4-ablaufplan-b-automatische-wartung-einrichten)
-5. [Ablaufplan C: Tabelle in eine Archiv-Datenbank migrieren (Cutover)](#5-ablaufplan-c-tabelle-in-eine-archiv-datenbank-migrieren)
-5a. [Ablaufplan D: Bereits partitionierte Tabelle mit neuer Partitionierung kopieren](#5a-ablaufplan-d-bereits-partitionierte-tabelle-mit-neuer-partitionierung-kopieren)
-6. [BoundaryType/SurrogateDateFormat — Referenz](#6-boundarytypesurrogatedateformat--referenz)
-7. [GUI-Assistent: Schritt-fuer-Schritt](#7-gui-assistent-schritt-fuer-schritt)
-8. [Troubleshooting und bekannte Einschraenkungen](#8-troubleshooting-und-bekannte-einschraenkungen)
-9. [Sicherheitshinweise](#9-sicherheitshinweise)
+- [1. Ueberblick: welcher Workflow passt zu meiner Situation?](#1-ueberblick)
+- [2. Voraussetzungen und Installation](#2-voraussetzungen-und-installation)
+- [3. Ablaufplan A: Bestehende Tabelle in-place partitionieren](#3-ablaufplan-a-bestehende-tabelle-in-place-partitionieren)
+- [4. Ablaufplan B: Automatische Wartung einrichten (Sliding-Window + Retention)](#4-ablaufplan-b-automatische-wartung-einrichten)
+- [5. Ablaufplan C: Tabelle in eine Archiv-Datenbank migrieren (Cutover)](#5-ablaufplan-c-tabelle-in-eine-archiv-datenbank-migrieren)
+- [5a. Ablaufplan D: Bereits partitionierte Tabelle mit neuer Partitionierung kopieren](#5a-ablaufplan-d-bereits-partitionierte-tabelle-mit-neuer-partitionierung-kopieren)
+- [5b. Wie die Daten kopiert werden (Kopier-Engine von sqmDataTransfer)](#5b-wie-die-daten-kopiert-werden)
+- [6. BoundaryType/SurrogateDateFormat — Referenz](#6-boundarytypesurrogatedateformat--referenz)
+- [7. GUI-Assistent: Schritt-fuer-Schritt](#7-gui-assistent-schritt-fuer-schritt)
+- [8. Troubleshooting und bekannte Einschraenkungen](#8-troubleshooting-und-bekannte-einschraenkungen)
+- [9. Sicherheitshinweise](#9-sicherheitshinweise)
 
 ---
 
@@ -49,18 +52,38 @@ soll (kein Cutover, keine Umbenennung) → D.
 
 ## 2. Voraussetzungen und Installation
 
-- PowerShell 5.1 oder hoeher (GUI benoetigt Desktop-CLR/WinForms — unter PowerShell 7 auf Windows
+- PowerShell 5.1 oder hoeher (GUI benoetigt Desktop-CLR/WinForms, unter PowerShell 7 auf Windows
   weiterhin verfuegbar, nicht aber auf PowerShell 7 unter Linux/macOS).
-- Module `dbatools` und `sqmSQLTool` (>= 1.9.2.0) muessen installiert sein.
+- Module `dbatools`, `sqmSQLTool` (>= 1.9.2.0) und **`sqmDataTransfer` (>= 0.1.22.0)**.
+  sqmDataTransfer liefert seit 1.15.0.0 die Kopier-Engine fuer Ablaufplan C, D und die Relocation
+  (siehe Abschnitt 5b). sqmSQLTool und sqmDataTransfer liegen nicht auf der PowerShell Gallery und
+  muessen **vorher** installiert werden.
 - Ein SQL-Server-Login mit ausreichenden Rechten auf der/den Zieldatenbank(en): `ALTER` auf die
   betroffene(n) Tabelle(n)/Datenbank(en), `CREATE`/`ALTER PROCEDURE`, sowie fuer die
   SQL-Agent-Jobs (Szenario B) Rechte auf `msdb`.
-- Fuer Szenario C: die **Ziel-Archivdatenbank muss vom Admin vorher angelegt sein** — das Tool legt
-  sie nicht automatisch an (bewusste Entscheidung, da Dateigroessen/-pfade/Recovery-Modell
+- Fuer Szenario C und D: die **Zieldatenbank muss vom Admin vorher angelegt sein**, das Tool legt
+  sie nicht automatisch an (bewusste Entscheidung, da Dateigroessen, Pfade und Recovery-Modell
   admin-spezifisch sind).
 
+**Installation in dieser Reihenfolge** (als Administrator, aus den jeweiligen Repository-Ordnern):
+
 ```powershell
-Import-Module "C:\CCM\SQL-Tools\sqmPartitionTool\sqmPartitionTool.psd1"
+# je Repository-Ordner, als Administrator
+.\sqmSQLTool\Install.ps1       -Scope AllUsers
+.\sqmDataTransfer\Install.ps1  -Scope AllUsers
+.\sqmPartitionTool\Install.ps1 -Scope AllUsers
+# bei gesperrter Ausfuehrungsrichtlinie jeweils:
+# powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\<Modul>\Install.ps1 -Scope AllUsers
+```
+
+Der Installer von sqmPartitionTool prueft, ob sqmSQLTool und sqmDataTransfer im selben Scope
+vorhanden und aktuell genug sind, und nennt fehlende oder veraltete Module. `dbatools` wird bei
+Bedarf von der Gallery nachinstalliert. Welche Version tatsaechlich laeuft, zeigt der GUI-Assistent
+im Fenstertitel (Version und Ladepfad), per Konsole:
+
+```powershell
+Get-Module sqmPartitionTool, sqmDataTransfer -ListAvailable |
+    Select-Object Name, Version, ModuleBase
 ```
 
 Verbindung erfolgt wahlweise per Windows-Authentifizierung (Standard) oder SQL Server
@@ -166,53 +189,101 @@ ohne etwas zu aendern.
 ## 5. Ablaufplan C: Tabelle in eine Archiv-Datenbank migrieren
 
 Ziel: eine (noch nicht partitionierte) aktive Tabelle wird **komplett** in eine partitionierte
-Kopie in einer separaten Archiv-Datenbank ueberfuehrt — die Quelltabelle wird am Ende umbenannt und
+Kopie in einer separaten Archiv-Datenbank ueberfuehrt. Am Ende wird die Quelltabelle umbenannt und
 durch eine Kompatibilitaets-View ersetzt, sodass bestehender Anwendungscode unveraendert weiter auf
 denselben Tabellennamen zugreifen kann (jetzt transparent gegen die Archiv-Kopie).
 
-1. **Archiv-Datenbank anlegen** (Admin-Aufgabe, nicht automatisiert) — Dateigroessen, Pfade,
-   Recovery-Modell nach eigenem Ermessen.
-2. **Schluessel pruefen:** die Migration braucht eine Spalte (oder Kombination aus bis zu 4
-   Spalten), die jede Zeile eindeutig identifiziert (fuer den MERGE-Abgleich). Ein einspaltiger
-   oder bis zu 4-spaltiger Clustered Index/PK wird automatisch erkannt — nur bei einem echten Heap
-   oder einem Schluessel mit mehr als 4 Spalten ist `-KeyColumn` Pflicht.
-3. **Migration starten:**
-   ```powershell
-   Invoke-sqmTableArchiveMigration -SqlInstance "SQL01" -Database "Sales" -Schema "dbo" `
-       -Table "OrderHistory" -ArchiveDatabaseName "SalesArchive" -DateColumn "OrderDate" `
-       -AllowKeyChange -PurgeSourceAfterArchive -CutoverToArchiveView -Confirm:$false
-   ```
-   Ablauf im Detail:
-   - Legt (beim ersten Aufruf) eine leere, partitionierte Strukturkopie in der Archiv-Datenbank an
-     (nutzt intern dieselbe Logik wie Ablaufplan A) und registriert sie automatisch fuer
-     Sliding-Window-Wartung — kein separates `New-sqmPartitionExtendJob` fuer die Archiv-Tabelle
-     noetig, das passiert automatisch.
-   - Migriert **monatsweise** per idempotenter `MERGE`-Batch-Prozedur (`dbo.sqm_ArchiveMonthBatch`,
-     wird in der Quelldatenbank deployed). Der laufende, noch nicht abgeschlossene Kalendermonat
-     wird standardmaessig **nicht** migriert (`-EndPeriod`-Default: Vormonat).
-   - **`-PurgeSourceAfterArchive`**: loescht nach jedem bestaetigt abgeschlossenen Monat dessen
-     Zeilen aus der Quelltabelle (nach Row-Count-Gegenpruefung) und gibt den Speicherplatz per
-     `DBCC SHRINKFILE` zurueck — wichtig bei wenig freiem Plattenplatz, da Quelle und Archiv-Kopie
-     sonst gleichzeitig Platz brauchen.
-   - **`-CutoverToArchiveView`**: sobald alle angeforderten Monate archiviert sind, wird die
-     Quelltabelle umbenannt (Standard-Suffix `_Original`, konfigurierbar ueber
-     `-RenamedTableSuffix`) und durch eine View mit dem urspruenglichen Namen ersetzt, die auf die
-     Archiv-Kopie zeigt. **Die umbenannte Original-Tabelle wird nie automatisch geloescht** — das
-     bleibt eine spaetere, manuelle Admin-Entscheidung.
-   - **Fortsetzbar/unterbrechbar:** jeder Schritt ist idempotent (MERGE, Row-Count-Gegenpruefung
-     vor jedem Loeschen). Ein Abbruch (Netzwerk, Prozess-Kill, Wartungsfenster zu Ende) an
-     beliebiger Stelle verliert nichts — ein erneuter Aufruf mit denselben Parametern setzt exakt
-     dort fort, wo zuletzt committet wurde.
-4. **Fortschritt beobachten** (bei sehr grossen Tabellen kann die Migration Stunden bis Tage
-   dauern): die Funktion zeigt `Write-Progress` sowie eine Konsolenzeile pro Monat
-   (`Archiving period 202401 (1 of 30) ...`) — sichtbar sowohl interaktiv als auch in einem
-   Transkript/umgeleiteten Log. Zusaetzlich laesst sich der Stand jederzeit direkt abfragen:
-   ```powershell
-   Invoke-Sqlcmd -ServerInstance "SQL01" -Database "Sales" -Query "SELECT * FROM dbo.sqm_ArchiveMonthLog ORDER BY YYYYMM"
-   ```
-5. **Nach erfolgreichem Cutover:** die umbenannte Original-Tabelle (`OrderHistory_Original`) nach
-   Pruefung manuell entfernen, sobald sicher ist, dass keine Restdaten (z.B. der zuletzt offene
-   Monat) mehr benoetigt werden.
+**Was beim Aufruf passiert:**
+
+- Beim ersten Aufruf wird eine leere Strukturkopie in der Archiv-Datenbank angelegt und monatsweise
+  partitioniert, ueber den tatsaechlichen Wertebereich der Quelle (intern dieselbe Logik wie
+  Ablaufplan A). Die Kopie wird automatisch fuer die Sliding-Window-Wartung registriert.
+  `-PrimaryKeyFromUniqueIndex <Index>` macht einen eindeutigen Nonclustered Index der Quelle zum
+  PRIMARY KEY CLUSTERED der Archiv-Kopie; ohne diese Option hat die Kopie keinen eindeutigen
+  Schluessel.
+- Danach wird **ein Monat pro Chunk** mit der Kopier-Engine von sqmDataTransfer uebertragen
+  (`Copy-sqmTableData`, SqlBulkCopy, siehe Abschnitt 5b). Auf der Konsole erscheinen je Monat
+  Zeilen, Dauer und Zeilen/s.
+- **Fortsetzen nach Abbruch:** jeder Aufruf zaehlt die Zeilen je Monat in Quelle und Archiv (je ein
+  GROUP BY). Ein Monat mit gleicher Zahl wird uebersprungen, ein Monat mit abweichender Zahl (Rest
+  eines abgebrochenen Laufs) im Archiv geleert und neu kopiert. Ein Schluessel ist dafuer nicht
+  noetig. Ein Monat gilt erst nach bestandener Zeilenzahl-Pruefung als `Completed` in
+  `dbo.sqm_ArchiveMonthLog` (Quelldatenbank).
+- Standardmaessig endet die Migration beim **Vormonat**. Mit **`-IncludeOpenPeriods`** wird
+  **alles** uebertragen, auch der laufende Monat und spaetere Monate mit Daten. Offene Monate werden
+  bei jedem Aufruf komplett neu kopiert, so kommen auch Zeilen nach, die nach dem ersten Lauf in die
+  weiterhin aktive Quelle geschrieben oder dort geaendert wurden. Sie bleiben im Log `InProgress`.
+- **`-PurgeSourceAfterArchive`** loescht jeden abgeschlossenen Monat nach der Zeilenzahl-Pruefung aus
+  der Quelle (in Batches) und gibt den Platz per `DBCC SHRINKFILE` zurueck
+  (`-ShrinkAfterEveryNPeriods`, `-AggressiveShrink`). Offene Monate werden **nie** geloescht:
+  zwischen Zaehlung und DELETE eintreffende Zeilen gingen sonst verloren.
+- **`-CutoverToArchiveView`** benennt die Quelltabelle am Ende um (Suffix `_Original`,
+  `-RenamedTableSuffix`) und legt unter dem alten Namen eine View auf die Archiv-Kopie an. Mit
+  `-IncludeOpenPeriods` laufen letzter Abgleich der offenen Monate, Umbenennen und View-Anlage in
+  **einer Transaktion unter exklusiver Tabellensperre**: zwischen letztem Chunk und Umbenennen kann
+  keine Zeile verloren gehen. Dafuer braucht dieser letzte Abgleich einen eindeutigen Schluessel
+  (`-PrimaryKeyFromUniqueIndex` oder `-KeyColumn`, bis 5 Spalten). Die umbenannte
+  Original-Tabelle wird **nie** automatisch geloescht.
+- **Selbstheilung nach frueheren Versuchen:** existiert die Archiv-Tabelle nicht (mehr), werden
+  veraltete Log-Eintraege dieser Tabelle zurueckgesetzt, statt Monate faelschlich als erledigt zu
+  ueberspringen. Eine unbenutzte Partition Function/Scheme gleichen Namens aus einem frueheren Lauf
+  wird mit den aktuellen Grenzen neu angelegt statt wiederverwendet.
+
+**Ablauf ohne GUI, Schritt fuer Schritt.** Dieselbe Funktion wird mehrfach mit denselben
+Grundparametern aufgerufen, jeder Aufruf setzt dort fort, wo der vorige aufgehoert hat. Nur
+Schritt 5 ist nicht ohne Weiteres rueckgaengig zu machen.
+
+```powershell
+# 0. Gemeinsame Parameter
+Import-Module sqmPartitionTool
+$p = @{
+    SqlInstance               = 'SQL01'
+    Database                  = 'Sales'
+    Schema                    = 'dbo'
+    Table                     = 'Bookings'
+    ArchiveDatabaseName       = 'SalesArchive'
+    DateColumn                = 'BOOKDATE'      # INT im Format YYYYMMDD
+    PrimaryKeyFromUniqueIndex = 'UX_Bookings'   # wird PK der Archiv-Kopie
+    IncludeOpenPeriods        = $true           # alles, inkl. laufendem Monat
+}
+
+# 1. Pruefen, ohne etwas zu aendern
+Test-sqmPartitionReadiness -SqlInstance SQL01 -Database Sales -Schema dbo `
+    -Table Bookings -PartitionColumn BOOKDATE
+Invoke-sqmTableArchiveMigration @p -WhatIf
+
+# 2. Optional: nur die partitionierte Archiv-Tabelle anlegen und ansehen
+Invoke-sqmTableArchiveMigration @p -CreateArchiveTableOnly
+
+# 3. Daten uebertragen, beliebig oft wiederholbar (setzt fort, gleicht den offenen Monat neu ab)
+Invoke-sqmTableArchiveMigration @p
+#    in Etappen:          -StartPeriod 202401 -EndPeriod 202406
+#    wenig Plattenplatz:  -PurgeSourceAfterArchive
+
+# 4. Kontrolle
+Get-sqmPartitionStatus -SqlInstance SQL01 -Database SalesArchive -Schema dbo -Table Bookings
+
+# 5. Abschluss: letzter Abgleich + Umbenennen + View in einer Transaktion
+Invoke-sqmTableArchiveMigration @p -CutoverToArchiveView
+
+# 6. Kuenftige Monatspartitionen automatisch anlegen
+New-sqmPartitionExtendJob -SqlInstance SQL01
+```
+
+**Fortschritt beobachten:** neben der Konsolenausgabe je Monat laesst sich der Stand jederzeit
+direkt abfragen:
+
+```sql
+SELECT YYYYMM, Status, RowsArchived, StartedAt, CompletedAt
+FROM dbo.sqm_ArchiveMonthLog              -- in der Quelldatenbank
+WHERE TableName = N'Bookings'
+ORDER BY YYYYMM;
+```
+
+**Nach erfolgreichem Cutover:** die umbenannte Original-Tabelle (`Bookings_Original`) nach Pruefung
+manuell entfernen. Ohne `-IncludeOpenPeriods` enthaelt sie noch den zuletzt offenen Monat.
+
+---
 
 ### Wann `-Method BatchedSwap` (Ablaufplan A) statt Ablaufplan C?
 
@@ -227,44 +298,83 @@ Datenbank** sollen (typischerweise eine separate, guenstiger/anders gesicherte A
 ## 5a. Ablaufplan D: Bereits partitionierte Tabelle mit neuer Partitionierung kopieren
 
 Ziel: eine **bereits partitionierte**, weiterhin aktive Tabelle soll zusaetzlich (nicht statt dessen)
-als eigenstaendige, **neu partitionierte** Kopie in einer anderen Datenbank existieren — z.B. mit
-groeberer Granularitaet fuer Reporting, oder als Testabzug vor einer geplanten Umstellung der
-Produktionstabelle. Im Unterschied zu Ablaufplan C gibt es **keinen Cutover**: die Quelltabelle wird
-nie umbenannt, nie durch eine View ersetzt und bleibt unter ihrem eigenen Partitionierungsschema
-vollstaendig unveraendert.
+als eigenstaendige, **neu partitionierte** Kopie in einer anderen Datenbank derselben Instanz
+existieren, z.B. mit groeberer Granularitaet fuer Reporting, oder als Testabzug vor einer geplanten
+Umstellung der Produktionstabelle. Im Unterschied zu Ablaufplan C gibt es **keinen Cutover**: die
+Quelltabelle wird nie umbenannt, nie durch eine View ersetzt und bleibt vollstaendig unveraendert.
 
-1. **Zieldatenbank anlegen** (Admin-Aufgabe, nicht automatisiert — gleiche Begruendung wie bei C).
-2. **Schluessel pruefen:** wie bei Ablaufplan C wird fuer den Batch-Kopiervorgang eine eindeutige
-   Spalte benoetigt. Ein einspaltiger Clustered Index/PK wird automatisch erkannt; bei Heap oder
-   zusammengesetztem Schluessel ist `-KeyColumn` Pflicht. Diese Spalte muss **nicht** mit der neuen
-   Partitionsspalte identisch sein.
-3. **Kopie starten:**
+1. **Zieldatenbank anlegen** (Admin-Aufgabe, nicht automatisiert, gleiche Begruendung wie bei C).
+2. **Kopie starten** (ohne `-TargetTableName` bekommt die Kopie den Namen der Quelle):
    ```powershell
    Copy-sqmPartitionedTable -SqlInstance "SQL01" -Database "Sales" -Schema "dbo" -Table "OrderHistory" `
        -TargetDatabaseName "SalesReporting" -Granularity Year -Confirm:$false
    ```
    Ablauf im Detail:
    - Prueft, dass die Quelltabelle tatsaechlich bereits partitioniert ist (sonst Fehler mit Verweis
-     auf Ablaufplan A/C) und leitet die Partitionsspalte automatisch aus dem bestehenden Partition
-     Scheme ab, sofern `-PartitionColumn` nicht ausdruecklich eine andere Spalte vorgibt.
-   - Legt beim ersten Aufruf die neue Partitionierung (Filegroups, Partition Function/Scheme) in der
-     Zieldatenbank an und erstellt dort eine strukturell identische Tabelle (Spalten, Indizes,
-     PK/UNIQUE-Constraints — Fremdschluessel/Trigger werden **nicht** mitgenommen).
-   - Kopiert alle Zeilen batchweise per Keyset-Pagination (`-KeyColumn`, `-BatchSize`) — resumable:
-     ein Abbruch oder `-MaxDurationMinutes` kann jederzeit per erneutem Aufruf fortgesetzt werden,
-     der dann automatisch bei der zuletzt kopierten Zeile weitermacht und Schritt "Tabelle anlegen"
-     ueberspringt.
-   - Registriert die neue Tabelle in `sqm_PartitionRegistry` (ausser `-NoRegister`) — Ablaufplan B1
-     (Sliding-Window) kann fuer sie danach wie fuer jede andere partitionierte Tabelle eingerichtet
-     werden.
-4. **Verifikation:** Zeilenzahlen von Quelle und Kopie werden am Ende automatisch abgeglichen —
-   weichen sie ab (z.B. weil waehrend der Kopie neue Zeilen in die weiterhin aktive Quelle
-   eingefuegt wurden), bricht die Funktion mit einer Fehlermeldung ab; ein erneuter Aufruf kopiert
-   die Differenz nach.
-5. Live gegen DEV01 verifiziert (`PartitionTestDB.dbo.sqmCopyTestSrc`, Month-partitioniert, 2600
-   Zeilen → `ArchiveTestDB.dbo.sqmCopyTestDst`, neu partitioniert nach Year): Quelle blieb
-   unveraendert auf ihrem Month-Scheme, Zielkopie zeigte korrekte Year-Grenzen und identische
-   Zeilenzahl, ein erneuter Aufruf kopierte 0 zusaetzliche Zeilen (Resume-Pfad).
+     auf Ablaufplan A/C) und leitet die Partitionsspalte aus dem bestehenden Partition Scheme ab,
+     sofern `-PartitionColumn` nicht ausdruecklich eine andere Spalte vorgibt.
+   - Legt beim ersten Aufruf die neue Partitionierung (Filegroups, Partition Function/Scheme) in
+     der Zieldatenbank an und erstellt dort eine strukturell identische Tabelle (Spalten, Indizes,
+     PK/UNIQUE-Constraints; Fremdschluessel und Trigger werden **nicht** mitgenommen).
+   - Kopiert **eine Partition der neuen Zieltabelle pro Chunk** mit der Kopier-Engine von
+     sqmDataTransfer (Abschnitt 5b). Gezaehlt wird je Partition ueber `$PARTITION` der neuen
+     Partition Function: vollstaendige Partitionen werden uebersprungen, eine unvollstaendige wird im
+     Ziel geleert und neu kopiert. **Kein Schluessel noetig**; ein angegebenes `-KeyColumn` wird
+     seit 1.15.0.0 ignoriert (Warnung).
+   - `-MaxDurationMinutes` beendet den Lauf sauber zwischen zwei Partitionen, ein erneuter Aufruf
+     setzt fort.
+   - Registriert die neue Tabelle in `sqm_PartitionRegistry` (ausser `-NoRegister`), Ablaufplan B1
+     kann danach wie fuer jede andere partitionierte Tabelle eingerichtet werden.
+3. **Verifikation:** Zeilenzahlen von Quelle und Kopie werden am Ende abgeglichen. Weichen sie ab
+   (z.B. weil waehrend der Kopie neue Zeilen in die weiterhin aktive Quelle kamen), meldet die
+   Funktion einen Fehler; ein erneuter Aufruf kopiert die Differenz nach.
+
+---
+
+## 5b. Wie die Daten kopiert werden
+
+Seit 1.15.0.0 laufen alle Kopien **zwischen Datenbanken** ueber die Kopier-Engine von
+**sqmDataTransfer**, dieselbe Strecke wie dessen Chunk-Transfer, die produktiv mit Tabellen von
+mehreren hundert Millionen Zeilen eingesetzt wird. Vorher nutzte sqmPartitionTool eigene
+T-SQL-Batches (MERGE bzw. Keyset-`INSERT ... SELECT TOP`); ohne passenden Index las jeder Batch die
+ganze Tabelle, und auf der Konsole kam stundenlang keine Rueckmeldung.
+
+Was die Engine mitbringt:
+
+- **SqlBulkCopy** mit expliziter Spaltenzuordnung ueber den Namen (eine berechnete Spalte mitten in
+  der Tabelle kann keine Spalten verschieben).
+- Bricht ein Chunk ab, wird die Quellabfrage auf dem Server **abgebrochen**, statt den Rest des
+  Chunks noch uebers Netz zu lesen.
+- Batchgroesse bei Columnstore-Zielen automatisch gedeckelt.
+- Fortschritt je Chunk (`Write-Progress`) plus eine Konsolenzeile mit Zeilen/s.
+
+| Funktion | Ein Chunk ist | Fortsetzen nach Abbruch |
+|---|---|---|
+| `Invoke-sqmTableArchiveMigration` | ein Kalendermonat | Zeilenzahl je Monat, Quelle gegen Archiv |
+| `Copy-sqmPartitionedTable` | eine Partition der neuen Zieltabelle | Zeilenzahl je Zielpartition ueber `$PARTITION` |
+| `Invoke-sqmTableRelocation` | automatisch erkannte Chunk-Spalte (Datum, Periode oder `YYYYMMDD`, monatsweise), sonst die ganze Tabelle | Zeilenzahl je Chunk |
+
+In allen drei Faellen wird ein Chunk mit gleicher Zeilenzahl auf beiden Seiten uebersprungen und ein
+Chunk mit abweichender Zahl im Ziel geleert und neu kopiert. Ohne `-BatchSize` gilt die
+Standard-Batchgroesse von sqmDataTransfer (`Get-sqmTransferConfig DefaultBatchSize`, 500000).
+
+**Bewusst unveraendert serverseitig:** die Retention-Archivierung einzelner abgelaufener Partitionen
+(`Invoke-sqmPartitionArchive`, Staging-Tabelle in die Archiv-DB derselben Instanz per
+`DELETE ... OUTPUT INTO`, transaktional je Batch, laeuft unbeaufsichtigt im Retention-Job) und die
+In-Place-Umwandlung `-Method NewTableSwap` (`INSERT ... WITH (TABLOCK)` in derselben Datenbank).
+Ueber den Client waeren beide nur ein zusaetzlicher Netzweg.
+
+**Praxis bei sehr grossen Tabellen:**
+
+- Den Lauf **auf dem SQL-Server-Host selbst** starten. SqlBulkCopy liest ueber den Client; von einer
+  Workstation aus geht jede Zeile zweimal uebers Netz.
+- `ASYNC_NETWORK_IO` an der **lesenden** Session ist normal, solange das Schreiben langsamer ist als
+  das Lesen. Der eigentliche Engpass zeigt sich an der **schreibenden** Session (`INSERT BULK`):
+  `WRITELOG` bzw. Log-Wachstum (bei FULL Recovery wird jede Zeile protokolliert, Log vorher passend
+  vergroessern), `PAGEIOLATCH` (Storage), `LCK_M_*` (Blockierung).
+- Waehrend einer Kopie **keine Index-Wartung, kein TRUNCATE und kein Partitions-SPLIT** auf der
+  Quelltabelle: die lesende Session haelt eine Schema-Sperre, die wartende DDL blockiert alles,
+  was sich dahinter einreiht.
 
 ---
 
@@ -286,9 +396,8 @@ Bei `Int`/`Text` steuert `-SurrogateDateFormat` die Genauigkeit:
 - `yyyyMM` — Monatsgenauigkeit ohne Tag, z.B. `202401` (typisch, wenn die Quellspalte selbst nur
   auf Monatsebene gefuehrt wird).
 
-Ein bekanntes reales Beispiel: eine Tabelle mit einer `INT`-Spalte im Format `YYYYMMDD` (z.B.
-`BOOKDATE`) braucht `-BoundaryType Int` (oder automatische Ableitung, falls kein anderer Typ
-zutreffen wuerde).
+Beispiel: eine Tabelle mit einer `INT`-Spalte im Format `YYYYMMDD` (z.B. `BOOKDATE`) braucht
+`-BoundaryType Int`, ohne Angabe wird das aus dem Spaltentyp abgeleitet.
 
 ---
 
@@ -309,43 +418,56 @@ Show-sqmPartitionToolGui -SqlInstance "SQL01"
 | 6 — Archive & Retention | Zwei sich gegenseitig ausschliessende Modi (siehe unten) |
 | 7 — Summary & Execute | Zusammenfassung, Ausfuehren-Button, Live-Log |
 
-**Schritt 6 — zwei Modi:**
+**Schritt 6 haengt von der gewaehlten Tabelle ab:**
 
-- **"Migrate to archive database now"** → Ablaufplan C. Bei aktivierter Checkbox erscheint bei
-  Bedarf (Heap oder Schluessel mit mehr als 4 Spalten) ein "Key Column(s)"-Auswahlfeld mit den
-  tatsaechlichen Spalten der Tabelle zum Ankreuzen. Bleibt der normale Fall (einfacher oder bis zu
-  4-spaltiger Schluessel automatisch erkennbar), bleibt dieser Bereich unsichtbar.
-- **"Set up automatic maintenance"** → Ablaufplan B. Nur relevant, wenn die Tabelle **in-place**
-  partitioniert bleibt (Ablaufplan A) — bei aktivem "Migrate now" ist dieser ganze Bereich
-  ausgeblendet, da er sich nicht auf den Sofort-Migrations-Pfad bezieht.
+- **Noch nicht partitioniert:**
+  - **"Migrate to archive database now"** fuehrt Ablaufplan C aus. Optionen: *Create the
+    partitioned archive table only* oder *Create the archive table AND transfer the data*;
+    *Include the current month* (vorausgewaehlt, uebertraegt alles, siehe `-IncludeOpenPeriods`);
+    *Delete each archived month from the source*; *rename the source table and replace it by a
+    view*. Bei einem Heap mit passendem eindeutigem Index bietet der Assistent an, ihn zum
+    Clustered PRIMARY KEY der Archiv-Tabelle zu machen. Ein "Key Column(s)"-Feld erscheint nur,
+    wenn ein Schluessel gebraucht wird und nicht abgeleitet werden kann.
+  - **"Set up automatic maintenance"** fuehrt Ablaufplan A + B aus (in-place partitionieren,
+    Sliding-Window, Retention). Bei aktivem "Migrate now" ist dieser Bereich ausgeblendet.
+- **Bereits partitioniert:** Copy-Modus (Ablaufplan D) mit Zieldatenbank und optionalem Zielnamen,
+  ohne Schluesselauswahl.
+
+"Finish" fragt nach, falls noch nichts ausgefuehrt wurde. Der Fenstertitel zeigt Modulversion und
+Ladepfad.
 
 ---
 
 ## 8. Troubleshooting und bekannte Einschraenkungen
 
-- **"'-KeyColumn' ist Pflicht"** bei Ablaufplan C: die Tabelle ist ein Heap oder hat einen
-  Schluessel mit mehr als 4 Spalten. Im GUI erscheint dafuer automatisch ein Auswahlfeld; per CLI
-  `-KeyColumn 'Spalte1','Spalte2',...` (max. 4) explizit angeben.
+- **Modul laedt nicht ("required module sqmDataTransfer")**: sqmDataTransfer >= 0.1.22.0 fehlt im
+  selben Scope. Zuerst sqmDataTransfer installieren, dann sqmPartitionTool (Abschnitt 2).
+- **Die GUI verhaelt sich wie eine alte Version** (z.B. nur eine Schluesselspalte erlaubt): es
+  laeuft eine aeltere installierte Kopie. Der Fenstertitel zeigt Version und Ladepfad;
+  `Get-Module sqmPartitionTool -ListAvailable` listet alle installierten Versionen.
+- **"'-KeyColumn' ist Pflicht"** bei Ablaufplan C: nur noch beim Cutover mit `-IncludeOpenPeriods`
+  auf einem Heap ohne eindeutigen Schluessel. `-PrimaryKeyFromUniqueIndex` oder
+  `-KeyColumn 'Spalte1','Spalte2',...` (max. 5) angeben.
 - **"date ist inkompatibel mit int"**: die Datumsspalte ist kein echter DATE/DATETIME-Typ, sondern
-  ein numerischer/String-Surrogatschluessel — `-BoundaryType Int`/`Text` (+ ggf.
+  ein numerischer/String-Surrogatschluessel, `-BoundaryType Int`/`Text` (+ ggf.
   `-SurrogateDateFormat`) angeben, siehe Abschnitt 6.
+- **Alle Zeilen landen in der letzten Partition der Archiv-Tabelle:** seit 1.13.0.0 behoben (eine
+  unbenutzte alte Partition Function wird neu angelegt). Bei aelteren Versionen die leere
+  Archiv-Tabelle und die alte Function/Scheme vor dem Lauf manuell entfernen.
+- **Monate fehlen im Archiv, obwohl das Log "Completed" zeigt:** seit 1.13.0.0 behoben (veraltete
+  Log-Eintraege werden zurueckgesetzt, wenn die Archiv-Tabelle neu angelegt wird).
 - **`-Method BatchedSwap` bricht mit Fehler ab** ("eingehende Fremdschluessel/Trigger"): diese
-  Methode unterstuetzt aktuell keine Tabellen, auf die andere Tabellen per Fremdschluessel
-  verweisen, oder die Trigger haben. Fremdschluessel/Trigger vorher entfernen, oder
-  `-Method Default`/`NewTableSwap` verwenden.
-- **Performance bei sehr grossen Tabellen (Ablaufplan C):** ohne einen Index mit der Datumsspalte
-  als fuehrender Spalte scanned jeder Batch-Aufruf potenziell die gesamte Tabelle. Das Tool warnt
-  automatisch, wenn kein passender Index gefunden wird, legt aber keinen automatisch an (bewusste
-  Admin-Entscheidung bei einer sehr grossen Tabelle) — vor einem echten Migrationslauf einen
-  nichtclustered Index auf `(Datumsspalte, Schluesselspalte(n))` in Erwaegung ziehen.
-  `-BatchSize` (Standard 50000) steuert, wie viele Zeilen pro Batch verarbeitet werden.
-  `-ShrinkAfterEveryNPeriods` (bei `-PurgeSourceAfterArchive`) steuert, wie oft der freigewordene
-  Speicherplatz zurueckgegeben wird.
-- **Umbenannte Original-Tabelle nach Cutover** (Ablaufplan C) waechst nicht weiter, enthaelt aber
-  ggf. noch den zuletzt offenen (nicht migrierten) Monat — vor dem endgueltigen Loeschen pruefen.
-- **`-Method BatchedSwap` und Ablaufplan C laufen nicht online** — beide sperren waehrend der
-  jeweiligen Batches kurzzeitig die betroffenen Zeilen/Partitionen. Fuer produktive Systeme
-  Wartungsfenster oder Zeiten mit geringer Last einplanen.
+  Methode unterstuetzt keine Tabellen, auf die andere Tabellen per Fremdschluessel verweisen, oder
+  die Trigger haben. Fremdschluessel/Trigger vorher entfernen, oder `-Method Default`/`NewTableSwap`.
+- **Performance bei sehr grossen Tabellen (Ablaufplan C):** ohne Index mit der Datumsspalte als
+  fuehrender Spalte liest jeder Monats-Chunk die ganze Tabelle. Das Tool warnt, legt aber keinen
+  Index an (Admin-Entscheidung). Weitere Hinweise zu Wartezeiten und Log in Abschnitt 5b.
+- **Umbenannte Original-Tabelle nach Cutover** (Ablaufplan C) waechst nicht weiter, enthaelt ohne
+  `-IncludeOpenPeriods` aber noch den zuletzt offenen Monat, vor dem endgueltigen Loeschen pruefen.
+- **`-Method BatchedSwap` und Ablaufplan C laufen nicht online:** beide sperren waehrend der
+  jeweiligen Batches kurzzeitig die betroffenen Zeilen/Partitionen, der atomare Cutover die ganze
+  Quelltabelle fuer die Dauer des letzten Abgleichs. Fuer produktive Systeme Wartungsfenster oder
+  Zeiten mit geringer Last einplanen.
 
 ---
 
