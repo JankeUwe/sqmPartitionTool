@@ -857,24 +857,6 @@
     $toolTip6TargetTable = New-Object System.Windows.Forms.ToolTip
     $toolTip6TargetTable.SetToolTip($txt6TargetTable, 'Leave empty to keep the same table name in the target database.')
 
-    # Eigene CheckedListBox statt $clb6Key wiederzuverwenden - die Ableitungsregel unterscheidet
-    # sich (Copy-sqmPartitionedTable: Get-sqmCopyKeyColumn, eindeutiger Index mit 1-5 NOT-NULL-
-    # Spalten; Invoke-sqmTableArchiveMigration: Clustered Index mit 1-5 Spalten - ein gemeinsamer
-    # "needed"-Zustand waere hier irrefuehrend).
-    $lbl6CopyKey = New-Object System.Windows.Forms.Label
-    $lbl6CopyKey.Text = 'Key Column(s) (no usable unique key - check ALL columns of a unique key, max. 5):'
-    $lbl6CopyKey.Location = New-Object System.Drawing.Point(24, 120)
-    $lbl6CopyKey.AutoSize = $true
-    $lbl6CopyKey.ForeColor = $cDim
-    $clb6CopyKey = New-Object System.Windows.Forms.CheckedListBox
-    $clb6CopyKey.Location = New-Object System.Drawing.Point(24, 144)
-    $clb6CopyKey.Size = New-Object System.Drawing.Size(360, 200)
-    $clb6CopyKey.BackColor = $cWindow
-    $clb6CopyKey.ForeColor = $cText
-    $clb6CopyKey.CheckOnClick = $true
-    $toolTip6CopyKey = New-Object System.Windows.Forms.ToolTip
-    $toolTip6CopyKey.SetToolTip($clb6CopyKey, 'Check the column(s) that together uniquely identify a row (up to 5, no NULL values). Used for resumable batch copying, not for the new partitioning itself. Only shown because this table has no unique index/PK with up to 5 NOT NULL columns.')
-
     # Nur bei In-place-Umwandlung eines Heaps, der einen geeigneten eindeutigen Nonclustered Index
     # hat (Test-Step6PkCandidate): daraus wird der Clustered PK auf dem Partition Scheme statt eines
     # neuen, nicht eindeutigen Index auf der Partitionsspalte. Bewusst NICHT vorausgewaehlt - es ist
@@ -897,7 +879,6 @@
     $p6.Controls.Add($lbl6CopyInfo)
     $p6.Controls.Add($lbl6TargetDb); $p6.Controls.Add($txt6TargetDb)
     $p6.Controls.Add($lbl6TargetTable); $p6.Controls.Add($txt6TargetTable)
-    $p6.Controls.Add($lbl6CopyKey); $p6.Controls.Add($clb6CopyKey)
 
     # Prueft (einmalig pro Tabellenwahl), ob die aktuell gewaehlte Tabelle einen Schluessel hat, aus
     # dem Invoke-sqmTableArchiveMigration automatisch ableiten kann (1-4-spaltiger Clustered
@@ -938,33 +919,6 @@ ORDER BY ic.key_ordinal
             # stillschweigend auf eine fehlschlagende automatische Ableitung zu vertrauen.
             $script:step6KeyColumnNeeded = $true
         }
-    }
-
-    # Prueft (einmalig pro Tabellenwahl), ob Copy-sqmPartitionedTable die Batch-Kopier-Schluessel-
-    # spalten automatisch ableiten kann - exakt dieselbe Regel wie dort (Get-sqmCopyKeyColumn).
-    $script:step6CopyKeyColumnNeeded = $false
-    $script:step6CopyKeyColumnChecked = $false
-    function Test-Step6CopyKeyColumnNeed
-    {
-        if ($script:step6CopyKeyColumnChecked) { return }
-        $script:step6CopyKeyColumnChecked = $true
-        try
-        {
-            $cp = $script:connParams
-            $keyConn = @{ SqlInstance = $script:wiz.SqlInstance }
-            if ($cp.SqlCredential) { $keyConn['SqlCredential'] = $cp.SqlCredential }
-            $autoKey = Get-sqmCopyKeyColumn -ConnParams $keyConn -Database $script:wiz.Database -Schema $script:wiz.SchemaName -Table $script:wiz.TableName
-            $script:step6CopyKeyColumnNeeded = ($autoKey.Columns.Count -eq 0)
-
-            if ($script:step6CopyKeyColumnNeeded)
-            {
-                $colQuery = "SELECT name FROM sys.columns WHERE object_id = OBJECT_ID(N'[$($script:wiz.SchemaName)].[$($script:wiz.TableName)]') ORDER BY column_id;"
-                $colRows = @(Invoke-DbaQuery @cp -SqlInstance $script:wiz.SqlInstance -Database $script:wiz.Database -Query $colQuery -ErrorAction Stop)
-                $clb6CopyKey.Items.Clear()
-                foreach ($c in $colRows) { [void]$clb6CopyKey.Items.Add($c.name) }
-            }
-        }
-        catch { $script:step6CopyKeyColumnNeeded = $true }
     }
 
     # Sucht (einmalig pro Tabelle + Partitionsspalte) einen eindeutigen Nonclustered Index, der sich
@@ -1024,10 +978,6 @@ ORDER BY KeyCount, i.index_id
         # Mit PK aus dem eindeutigen Index sind die Schluesselspalten dessen Spalten - keine Auswahl noetig
         (-not $script:wiz.SourceIsPartitioned) -and $chk6MigrateNow.Checked -and $script:step6KeyColumnNeeded -and -not (Test-Step6PkActive)
     }
-    function Test-Step6CopyKeyListActive
-    {
-        $script:wiz.SourceIsPartitioned -and $script:step6CopyKeyColumnNeeded
-    }
 
     function Set-Step6Mode
     {
@@ -1039,9 +989,6 @@ ORDER BY KeyCount, i.index_id
         $lbl6CopyInfo.Visible = $copyMode
         $lbl6TargetDb.Visible = $copyMode; $txt6TargetDb.Visible = $copyMode
         $lbl6TargetTable.Visible = $copyMode; $txt6TargetTable.Visible = $copyMode
-        if ($copyMode) { Test-Step6CopyKeyColumnNeed }
-        $showCopyKey = $copyMode -and $script:step6CopyKeyColumnNeeded
-        $lbl6CopyKey.Visible = $showCopyKey; $clb6CopyKey.Visible = $showCopyKey
 
         if (-not $copyMode) { Test-Step6PkCandidate }
         $chk6Pk.Visible = (-not $copyMode) -and [bool]$script:step6PkCandidate
@@ -1179,9 +1126,7 @@ ORDER BY KeyCount, i.index_id
         {
             $targetTableForSummary = if ($txt6TargetTable.Text.Trim()) { $txt6TargetTable.Text.Trim() } else { $script:wiz.TableName }
             $lines.Add("Mode                 : COPY (new partitioning) -> '$($txt6TargetDb.Text.Trim()).$($script:wiz.SchemaName).$targetTableForSummary'")
-            if ((Test-Step6CopyKeyListActive) -and $clb6CopyKey.CheckedItems.Count -gt 0) { $lines.Add("Key Column(s)        : $(@($clb6CopyKey.CheckedItems | ForEach-Object { [string]$_ }) -join ', ') (explicit, $($clb6CopyKey.CheckedItems.Count) column(s))") }
-            elseif (Test-Step6CopyKeyListActive) { $lines.Add('Key Column(s)        : NONE CHECKED - required for this table') }
-            else { $lines.Add('Key Column(s)        : (auto-derive from unique index/PK)') }
+            $lines.Add('Copy method          : per target partition with sqmDataTransfer (SqlBulkCopy), resumable, no key needed')
             $lines.Add("Partitions           : $($script:wiz.Boundaries.Count + 1) ($($script:wiz.Boundaries.Count) boundary value(s))")
             $lines.Add('                       Source table stays fully active and unchanged (no rename, no cutover).')
             $txt7Summary.Text = $lines -join "`r`n"
@@ -1248,14 +1193,6 @@ ORDER BY KeyCount, i.index_id
                 [System.Windows.Forms.MessageBox]::Show("Please enter a Target Database name.", 'Missing input', 'OK', 'Warning') | Out-Null
                 return
             }
-            # 1-5 Spalten: Copy-sqmPartitionedTable blaettert ueber das Schluesseltupel.
-            $copyKeyCount = $clb6CopyKey.CheckedItems.Count
-            if ((Test-Step6CopyKeyListActive) -and ($copyKeyCount -lt 1 -or $copyKeyCount -gt 5))
-            {
-                [System.Windows.Forms.MessageBox]::Show("Please check 1 to 5 Key Columns (checked: $copyKeyCount).`n`nThe checked columns must together identify each row uniquely and must not contain NULL values.", 'Key Column(s)', 'OK', 'Warning') | Out-Null
-                return
-            }
-
             $targetTableName = if ($txt6TargetTable.Text.Trim()) { $txt6TargetTable.Text.Trim() } else { $script:wiz.TableName }
             $confirm = [System.Windows.Forms.MessageBox]::Show("Copy '$($script:wiz.SchemaName).$($script:wiz.TableName)' as a NEW, independently partitioned table into '$($txt6TargetDb.Text.Trim())'?`n`nThe source table is NOT modified - it stays active under its current partitioning.", 'Confirm', 'YesNo', 'Warning')
             if ($confirm -ne 'Yes') { return }
@@ -1283,12 +1220,6 @@ ORDER BY KeyCount, i.index_id
                     Confirm             = $false
                     ErrorAction         = 'Stop'
                     EnableException     = $true
-                }
-                if (Test-Step6CopyKeyListActive)
-                {
-                    # Reihenfolge = Spaltenreihenfolge der Tabelle (CheckedItems folgt der Listenreihenfolge)
-                    $copyParams['KeyColumn'] = [string[]]@($clb6CopyKey.CheckedItems | ForEach-Object { [string]$_ })
-                    Add-Log "Key columns: $($copyParams['KeyColumn'] -join ', ')"
                 }
                 $result = Copy-sqmPartitionedTable @cp @copyParams
                 Add-Log "Copy completed: $($result.RowsCopied) row(s) copied, $($result.RowsVerified) row(s) verified in target, status $($result.Status)."
@@ -1536,7 +1467,6 @@ ORDER BY KeyCount, i.index_id
                 $script:wiz.IsHeap = ($r.Cells['Typ'].Value -eq 'Heap')
                 $script:wiz.SourceIsPartitioned = ($r.Cells['Status'].Value -eq 'already partitioned')
                 $script:step6KeyColumnChecked = $false
-                $script:step6CopyKeyColumnChecked = $false
                 Set-Step6Mode
                 if ($script:wiz.SourceIsPartitioned)
                 {

@@ -13,9 +13,10 @@
 
     The required dependency 'dbatools' is ensured automatically in the SAME scope
     before the import test (installed from the PSGallery if missing). 'sqmSQLTool'
-    is a required dependency too (Invoke-sqmLogging, Get-sqmSaLogin, WinForms theme)
-    but is NOT on the PSGallery - it is only checked for and a clear error is shown
-    if missing, pointing at sqmSQLTool's own Install.cmd.
+    (Invoke-sqmLogging, Get-sqmSaLogin, WinForms theme) and 'sqmDataTransfer' (copy
+    routines) are required dependencies too but are NOT on the PSGallery - they are
+    only checked for and a clear error is shown if missing or too old, pointing at
+    their own Install.cmd.
 
 .PARAMETER Scope
     Installation scope:
@@ -146,43 +147,51 @@ if ($Scope -eq 'AllUsers') {
 }
 
 # ---------------------------------------------------------------------------
-# 3b. Abhaengigkeit 'sqmSQLTool' pruefen: vorhanden UND aktuell genug.
-#     Muss im GLEICHEN Scope liegen wie die Zielinstallation, sonst findet eine
-#     AllUsers-Session ein nur in CurrentUser installiertes sqmSQLTool nicht.
-#     Versions-Check noetig, weil sqmPartitionTool.psd1 zwar RequiredModules mit
-#     Mindestversion deklariert, ein zu altes sqmSQLTool aber sonst erst beim
-#     Import mit einer wenig hilfreichen Fehlermeldung auffaellt.
+# 3b. Abhaengigkeiten 'sqmSQLTool' und 'sqmDataTransfer' pruefen: vorhanden UND
+#     aktuell genug. Muessen im GLEICHEN Scope liegen wie die Zielinstallation,
+#     sonst findet eine AllUsers-Session ein nur in CurrentUser installiertes
+#     Modul nicht. Versions-Check noetig, weil sqmPartitionTool.psd1 zwar
+#     RequiredModules mit Mindestversion deklariert, ein zu altes Modul aber sonst
+#     erst beim Import mit einer wenig hilfreichen Fehlermeldung auffaellt.
+#     Beide sind nicht auf der PSGallery.
 # ---------------------------------------------------------------------------
-$sqlToolMinVersion = [version]'1.9.2.0'
-$auSqlTool = Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules\sqmSQLTool'
-$cuSqlTool = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'WindowsPowerShell\Modules\sqmSQLTool'
-$sqlToolPath = if ($Scope -eq 'AllUsers') {
-    if (Test-Path $auSqlTool) { $auSqlTool } else { $null }
-} else {
-    if (Test-Path $cuSqlTool) { $cuSqlTool } elseif (Test-Path $auSqlTool) { $auSqlTool } else { $null }
-}
+$sqmDependencies = @(
+    @{ Name = 'sqmSQLTool';      MinVersion = [version]'1.9.2.0';  Purpose = 'Logging, WinForms-Theme, SA-Login-Ermittlung' }
+    @{ Name = 'sqmDataTransfer'; MinVersion = [version]'0.1.22.0'; Purpose = 'Kopierroutinen (SqlBulkCopy) fuer Archiv-Migration, Copy und Relocation' }
+)
+$missingDeps = @()
+foreach ($dep in $sqmDependencies) {
+    $auPath = Join-Path $env:ProgramFiles "WindowsPowerShell\Modules\$($dep.Name)"
+    $cuPath = Join-Path ([Environment]::GetFolderPath('MyDocuments')) "WindowsPowerShell\Modules\$($dep.Name)"
+    $depPath = if ($Scope -eq 'AllUsers') {
+        if (Test-Path $auPath) { $auPath } else { $null }
+    } else {
+        if (Test-Path $cuPath) { $cuPath } elseif (Test-Path $auPath) { $auPath } else { $null }
+    }
 
-if (-not $sqlToolPath) {
-    Write-Warning "sqmSQLTool wurde im Scope '$Scope' nicht gefunden - sqmPartitionTool benoetigt es"
-    Write-Warning "zwingend (Logging, WinForms-Theme, SA-Login-Ermittlung) und wird ohne es nicht laden."
-    Write-Warning "sqmSQLTool ist nicht auf der PSGallery - bitte zuerst installieren:"
-    Write-Warning "  sqmSQLTool\Install.cmd$(if ($Scope -eq 'AllUsers') { ' AllUsers' })"
-    Write-Host ""
-} else {
+    if (-not $depPath) {
+        $missingDeps += $dep.Name
+        Write-Warning "$($dep.Name) wurde im Scope '$Scope' nicht gefunden - sqmPartitionTool benoetigt es"
+        Write-Warning "zwingend ($($dep.Purpose)) und wird ohne es nicht laden. Bitte zuerst installieren:"
+        Write-Warning "  $($dep.Name)\Install.cmd$(if ($Scope -eq 'AllUsers') { ' AllUsers' })"
+        Write-Host ""
+        continue
+    }
     try {
-        $sqlToolManifest = Import-PowerShellDataFile -Path (Join-Path $sqlToolPath 'sqmSQLTool.psd1') -ErrorAction Stop
-        $sqlToolVersion = [version]$sqlToolManifest.ModuleVersion
-        if ($sqlToolVersion -lt $sqlToolMinVersion) {
-            Write-Warning "sqmSQLTool ist veraltet: gefunden v$sqlToolVersion, benoetigt >= v$sqlToolMinVersion."
+        $depManifest = Import-PowerShellDataFile -Path (Join-Path $depPath "$($dep.Name).psd1") -ErrorAction Stop
+        $depVersion = [version]$depManifest.ModuleVersion
+        if ($depVersion -lt $dep.MinVersion) {
+            $missingDeps += $dep.Name
+            Write-Warning "$($dep.Name) ist veraltet: gefunden v$depVersion, benoetigt >= v$($dep.MinVersion)."
             Write-Warning "sqmPartitionTool wird sich weigern zu laden (RequiredModules-Versionscheck). Bitte zuerst aktualisieren:"
-            Write-Warning "  git pull   (im sqmSQLTool-Repo)"
-            Write-Warning "  sqmSQLTool\Install.cmd$(if ($Scope -eq 'AllUsers') { ' AllUsers' })"
+            Write-Warning "  git pull   (im $($dep.Name)-Repo)"
+            Write-Warning "  $($dep.Name)\Install.cmd$(if ($Scope -eq 'AllUsers') { ' AllUsers' })"
             Write-Host ""
         } else {
-            Write-Host "sqmSQLTool v$sqlToolVersion gefunden (Mindestversion v$sqlToolMinVersion erfuellt)." -ForegroundColor Gray
+            Write-Host "$($dep.Name) v$depVersion gefunden (Mindestversion v$($dep.MinVersion) erfuellt)." -ForegroundColor Gray
         }
     } catch {
-        Write-Warning "sqmSQLTool-Version konnte nicht gelesen werden ($sqlToolPath): $_"
+        Write-Warning "$($dep.Name)-Version konnte nicht gelesen werden ($depPath): $_"
     }
 }
 
@@ -212,7 +221,7 @@ Get-ChildItem -Path $Destination -Recurse -File | ForEach-Object {
 
 # ---------------------------------------------------------------------------
 # 5b. dbatools-Abhaengigkeit im PASSENDEN Scope sicherstellen
-#     sqmPartitionTool.psd1 hat RequiredModules = @('dbatools','sqmSQLTool') -> ohne
+#     sqmPartitionTool.psd1 hat RequiredModules = @('dbatools','sqmSQLTool','sqmDataTransfer') -> ohne
 #     dbatools schlaegt der Import-Test (Schritt 6) fehl. Installation im GLEICHEN
 #     Scope wie sqmPartitionTool, sonst Scope-Mismatch.
 # ---------------------------------------------------------------------------
@@ -256,8 +265,8 @@ try {
     $importOk = $true
 } catch {
     Write-Warning "Import failed: $_"
-    if (-not $sqlToolInScope) {
-        Write-Warning "(Erwartet - sqmSQLTool fehlt noch im Scope '$Scope', siehe Hinweis oben.)"
+    if ($missingDeps.Count -gt 0) {
+        Write-Warning "(Erwartet - $($missingDeps -join ', ') fehlt/veraltet im Scope '$Scope', siehe Hinweis oben.)"
     }
 }
 

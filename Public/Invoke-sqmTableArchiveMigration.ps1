@@ -23,11 +23,13 @@
         PAGE-Kompression auf ALLE Partitionen der Archiv-Tabelle an (ALTER TABLE ... REBUILD).
         SELECT INTO kennt keine Kompressions-Klausel, daher als separater Schritt danach - laeuft
         ebenfalls nur beim allerersten Aufruf.
-    3. In der QUELLDATENBANK (nicht master) eine Log-Tabelle (dbo.sqm_ArchiveMonthLog) und eine
-       MERGE-Batch-Prozedur (dbo.sqm_ArchiveMonthBatch) idempotent anlegen/aktualisieren.
+    3. In der QUELLDATENBANK (nicht master) die Log-Tabelle (dbo.sqm_ArchiveMonthLog) idempotent
+       anlegen/aktualisieren.
     4. Fuer jeden noch nicht abgeschlossenen Monat (YYYYMM, Standard: vom aeltesten Datenwert bis
-       zum VORMONAT - der laufende Monat wird standardmaessig nicht migriert) die Prozedur
-       wiederholt aufrufen, bis sie den Monat als abgeschlossen meldet.
+       zum VORMONAT - der laufende Monat wird standardmaessig nicht migriert) die Zeilen des Monats
+       mit den Kopierroutinen von sqmDataTransfer uebertragen (Copy-sqmTableData -SourceQuery,
+       SqlBulkCopy) - dieselbe Strecke wie Invoke-sqmChunkedTableTransfer, mit Fortschritt und
+       Durchsatz je Monat auf der Konsole.
     4b. Optional (-PurgeSourceAfterArchive): nach jedem abgeschlossenen Monat werden dessen Zeilen
         (nach Row-Count-Gegenpruefung) batchweise aus der Quelltabelle geloescht und - alle
         -ShrinkAfterEveryNPeriods Monate - der freigewordene Platz per DBCC SHRINKFILE auf dem
@@ -35,12 +37,11 @@
         Migration sonst nicht durchlaufen wuerde, weil Quelle UND Archiv-Kopie gleichzeitig Platz
         brauchen.
 
-    Sicherheit gegen Unterbrechung: jeder Batch ist ein MERGE (WHEN MATCHED -> UPDATE, WHEN NOT
-    MATCHED -> INSERT), also beliebig oft wiederholbar ohne Duplikate. Der Fortsetzpunkt
-    (LastKeyProcessed) liegt dauerhaft in dbo.sqm_ArchiveMonthLog, nicht im Funktionsaufruf selbst -
-    ein Abbruch (Netzwerk, Prozess-Kill) an JEDER Stelle verliert nichts, ein erneuter Aufruf
-    (derselbe Funktionsaufruf oder direkt die Prozedur) setzt exakt dort fort, wo zuletzt committet
-    wurde.
+    Sicherheit gegen Unterbrechung: ein erneuter Aufruf zaehlt je Monat die Zeilen in Quelle und
+    Archiv (je EIN GROUP BY-Scan). Ein abgeschlossener Monat mit gleicher Zahl wird uebersprungen,
+    ein Monat mit abweichender Zahl (Rest eines abgebrochenen Laufs) im Archiv geleert und neu
+    kopiert - keine Duplikate, kein Schluessel noetig. Ein Monat gilt erst nach der
+    Zeilenzahl-Pruefung als 'Completed' in dbo.sqm_ArchiveMonthLog.
 
     Ohne -PurgeSourceAfterArchive wird die Quelltabelle von dieser Funktion nie geloescht oder
     umbenannt - ob/wann Quelldaten entfernt werden, ist dann eine spaetere, manuelle
@@ -74,7 +75,8 @@
 .PARAMETER Granularity
     Aktuell nur 'Month' unterstuetzt (YYYYMM-basierte Migration).
 .PARAMETER BatchSize
-    Zeilen pro MERGE-Batch *innerhalb* eines Monats. Standard: 50000.
+    SqlBulkCopy-Batchgroesse innerhalb eines Monats. Ohne Angabe gilt die Standard-Batchgroesse
+    von sqmDataTransfer (Get-sqmTransferConfig DefaultBatchSize, Standard 500000).
 .PARAMETER StartPeriod
     Erster zu migrierender Monat (YYYYMM). Ohne Angabe: der Monat von MIN(DateColumn) der Quelle.
 .PARAMETER EndPeriod
@@ -176,11 +178,11 @@
         -StartPeriod 202401 -EndPeriod 202412 -BatchSize 20000
 
 .NOTES
-    Benoetigt: dbatools, Invoke-sqmLogging (sqmSQLTool), Invoke-sqmTablePartitionConversion,
-    Get-sqmPartitionColumnRange, Install-sqmArchiveMigrationInfra (privat). Die Archiv-Datenbank
-    muss vom Admin bereits angelegt sein. Erneuter Aufruf ist jederzeit sicher (idempotent) - bereits
-    abgeschlossene Monate werden uebersprungen, ein unterbrochener Monat setzt beim
-    Fortsetzpunkt aus dbo.sqm_ArchiveMonthLog (Quelldatenbank) fort.
+    Benoetigt: dbatools, Invoke-sqmLogging (sqmSQLTool), Copy-sqmTableData (sqmDataTransfer),
+    Invoke-sqmTablePartitionConversion, Get-sqmPartitionColumnRange,
+    Install-sqmArchiveMigrationInfra (privat). Die Archiv-Datenbank muss vom Admin bereits angelegt
+    sein. Erneuter Aufruf ist jederzeit sicher - bereits abgeschlossene Monate werden uebersprungen,
+    ein unterbrochener Monat wird im Archiv geleert und neu kopiert.
 #>
 function Invoke-sqmTableArchiveMigration
 {
@@ -455,8 +457,12 @@ ORDER BY ic.key_ordinal
 "@
 			# @(...) erzwingt Array-Kontext - siehe gleicher Kommentar in Invoke-sqmTableRelocation.
 			$ciKeyRows = @(Invoke-DbaQuery @connParams -Database $Database -Query $ciKeyQuery -ErrorAction Stop -EnableException -As PSObject)
-			if ($ciKeyRows.Count -eq 0) { throw "'-KeyColumn' ist Pflicht: '$Schema.$Table' ist ein Heap (kein Clustered Index/PK, aus dem ein Schluessel automatisch abgeleitet werden koennte)." }
-			if ($ciKeyRows.Count -gt 5) { throw "'$Schema.$Table' hat einen zusammengesetzten Schluessel mit $($ciKeyRows.Count) Spalten - aktuell werden maximal 5 Schluesselspalten unterstuetzt. '-KeyColumn' muss eine eigene, hoechstens 5-spaltige eindeutige Schluesselliste explizit angeben." }
+			# Kopiert wird monatsweise per SqlBulkCopy (sqmDataTransfer) - dafuer braucht es keinen
+			# Schluessel. Gebraucht wird er nur fuer den abschliessenden MERGE der offenen Monate beim
+			# atomaren Cutover (-IncludeOpenPeriods -CutoverToArchiveView).
+			$keyNeeded = $IncludeOpenPeriods -and $CutoverToArchiveView
+			if ($ciKeyRows.Count -eq 0 -and $keyNeeded) { throw "'-KeyColumn' ist Pflicht: '$Schema.$Table' ist ein Heap - der abschliessende Abgleich beim Cutover mit -IncludeOpenPeriods braucht einen eindeutigen Schluessel (alternativ -PrimaryKeyFromUniqueIndex)." }
+			if ($ciKeyRows.Count -gt 5 -and $keyNeeded) { throw "'$Schema.$Table' hat einen zusammengesetzten Schluessel mit $($ciKeyRows.Count) Spalten - aktuell werden maximal 5 Schluesselspalten unterstuetzt. '-KeyColumn' muss eine eigene, hoechstens 5-spaltige eindeutige Schluesselliste explizit angeben." }
 			$KeyColumn = @($ciKeyRows | ForEach-Object { $_.ColumnName })
 		}
 		elseif (@($KeyColumn).Count -gt 5)
@@ -464,11 +470,11 @@ ORDER BY ic.key_ordinal
 			throw "'-KeyColumn' unterstuetzt aktuell maximal 5 Spalten (erhalten: $(@($KeyColumn).Count))."
 		}
 		$keyColumnsCsv = ($KeyColumn -join ',')
-		Invoke-sqmLogging -Message "Schluessel fuer '$Schema.$Table': $keyColumnsCsv$(if (@($KeyColumn).Count -gt 1) { ' (zusammengesetzt)' })." -FunctionName $functionName -Level "INFO"
+		if ($keyColumnsCsv) { Invoke-sqmLogging -Message "Schluessel fuer '$Schema.$Table': $keyColumnsCsv$(if (@($KeyColumn).Count -gt 1) { ' (zusammengesetzt)' })." -FunctionName $functionName -Level "INFO" }
 
 		# ---------------------------------------------------------------------------------------
 		# 1b. Nicht blockierender Hinweis: ohne einen Index mit $DateColumn als fuehrender Spalte
-		#     scanned jeder Batch-Aufruf von sqm_ArchiveMonthBatch potenziell die gesamte Tabelle -
+		#     liest jeder Monats-Chunk potenziell die gesamte Tabelle -
 		#     bei sehr grossen Tabellen (mehrere 100GB+) ein echtes Performance-Risiko. Anlegen eines
 		#     passenden Index ist eine Admin-Entscheidung, wird hier nur empfohlen, nicht automatisch
 		#     ausgefuehrt.
@@ -483,7 +489,7 @@ WHERE i.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND c.name = N'$DateColumn'
 		$dateColIndexed = Invoke-DbaQuery @connParams -Database $Database -Query $dateIdxQuery -ErrorAction Stop -EnableException -As PSObject
 		if (-not $dateColIndexed)
 		{
-			Invoke-sqmLogging -Message "'$Schema.$Table' hat keinen Index mit '$DateColumn' als fuehrender Spalte - jeder Batch-Aufruf von sqm_ArchiveMonthBatch scanned dadurch potenziell die gesamte Tabelle/Partition. Bei grossen Tabellen wird DRINGEND empfohlen, VOR einem echten Migrationslauf einen nichtclustered Index auf ($DateColumn, $keyColumnsCsv) anzulegen (Admin-Entscheidung, wird von diesem Tool NICHT automatisch erstellt)." -FunctionName $functionName -Level "WARNING"
+			Invoke-sqmLogging -Message "'$Schema.$Table' hat keinen Index mit '$DateColumn' als fuehrender Spalte - jeder Monats-Chunk liest dadurch die gesamte Tabelle. Bei grossen Tabellen wird DRINGEND empfohlen, VOR einem echten Migrationslauf einen nichtclustered Index auf ($DateColumn) anzulegen (Admin-Entscheidung, wird von diesem Tool NICHT automatisch erstellt)." -FunctionName $functionName -Level "WARNING"
 		}
 
 		# ---------------------------------------------------------------------------------------
@@ -492,7 +498,7 @@ WHERE i.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND c.name = N'$DateColumn'
 		#     Char/Varchar/Nchar/Nvarchar -> 'Text' [Surrogat im -SurrogateDateFormat als String],
 		#     sonst -> 'Int' [Surrogat als Ganzzahl, z.B. CORO_DB.dbo.CARCHIVE.VTDAT]). Noetig, weil
 		#     sowohl die Start/EndPeriod-Ableitung aus dem Quellwertebereich als auch die an
-		#     sqm_ArchiveMonthBatch uebergebenen Periodengrenzen sonst blind einen echten
+		#     Monats-Chunks uebergebenen Periodengrenzen sonst blind einen echten
 		#     DATE/DATETIME-Typ voraussetzen wuerden - schlaegt bei einem YYYYMMDD-Surrogat wie
 		#     VTDAT sonst mit "date ist inkompatibel mit int" fehl (live gegen CARCHIVE bestaetigt).
 		# ---------------------------------------------------------------------------------------
@@ -745,7 +751,12 @@ WHERE i.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND c.name = N'$DateColumn'
 		& $mod { param($p) Install-sqmArchiveMigrationInfra @p } $installParams | Out-Null
 
 		# =========================================================================================
-		# 5. Je ausstehendem Monat: Batch-Prozedur wiederholt aufrufen, bis MonthComplete = 1
+		# 5. Je ausstehendem Monat: Daten mit den Kopierroutinen von sqmDataTransfer uebertragen
+		#    (Copy-sqmTableData -SourceQuery -> SqlBulkCopy mit Namens-Mapping, Abbruch per Cancel,
+		#    Columnstore-Deckel, Fortschritt) - dieselbe, im Produktivbetrieb bewaehrte Strecke wie
+		#    Invoke-sqmChunkedTableTransfer, statt eigener MERGE-Batches (sqm_ArchiveMonthBatch).
+		#    Fortsetzen nach Abbruch: Zeilenzahl je Monat Quelle/Archiv aus je EINEM GROUP BY-Scan;
+		#    ein Monat mit abweichender Zahl wird im Archiv geleert und neu kopiert.
 		# =========================================================================================
 		$totalRows = 0
 		$totalPurgedRows = 0
@@ -753,52 +764,124 @@ WHERE i.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND c.name = N'$DateColumn'
 		$shrinkRunsPerformed = 0
 		$periodIndex = 0
 		$totalPeriodsToProcess = $pendingPeriods.Count
-		# Invoke-sqmLogging schreibt NUR in eine Logdatei, nie auf die Konsole - ohne dieses
-		# Write-Progress/Write-Host haette ein Admin bei einer sehr grossen Tabelle (mehrere
-		# 100GB-TB) ueber Stunden/Tage hinweg keinerlei sichtbares Lebenszeichen, dass die Migration
-		# tatsaechlich noch laeuft (nicht nur haengt). Write-Progress fuer interaktive Konsolen,
-		# zusaetzlich eine Write-Host-Zeile pro Monat, damit es auch in einem Transkript/einer
-		# umgeleiteten Ausgabe (nicht-interaktiv, z.B. geplanter Task) sichtbar bleibt.
+
+		$bucketExpr = switch ($BoundaryType)
+		{
+			'Int' { if ($SurrogateDateFormat -eq 'yyyyMM') { "[$DateColumn]" } else { "([$DateColumn] / 100)" } }
+			'Text' { "CAST(LEFT([$DateColumn], 6) AS INT)" }
+			default { "(YEAR([$DateColumn]) * 100 + MONTH([$DateColumn]))" }
+		}
+		# Bereichspraedikat auf der nackten Spalte (Index-Seek moeglich); 'yyyyMMdd' fuer Datumstypen
+		# ist DATEFORMAT-unabhaengig (siehe New-sqmPartitionSchemeSet.ps1).
+		function _PeriodPredicate([int]$fromPeriod, [int]$toPeriodExclusiveStart)
+		{
+			$s = [datetime]::ParseExact("$($fromPeriod)01", 'yyyyMMdd', $null)
+			$e = [datetime]::ParseExact("$($toPeriodExclusiveStart)01", 'yyyyMMdd', $null)
+			$lit = {
+				param($d)
+				switch ($BoundaryType) { 'Int' { [int64]$d.ToString($SurrogateDateFormat) }; 'Text' { "'$($d.ToString($SurrogateDateFormat))'" }; default { "'$($d.ToString('yyyyMMdd'))'" } }
+			}
+			"[$DateColumn] >= $(& $lit $s) AND [$DateColumn] < $(& $lit $e)"
+		}
+		function _NextPeriod([int]$p) { [int]([datetime]::ParseExact("$($p)01", 'yyyyMMdd', $null).AddMonths(1).ToString('yyyyMM')) }
+
+		$archiveFqn = "[$ArchiveDatabaseName].[$ArchiveSchemaName].[$Table]"
+		$srcCountByPeriod = @{}
+		$dstCountByPeriod = @{}
+		if ($totalPeriodsToProcess -gt 0)
+		{
+			$rangePredicate = _PeriodPredicate ($pendingPeriods | Measure-Object -Minimum).Minimum (_NextPeriod ($pendingPeriods | Measure-Object -Maximum).Maximum)
+			Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Counting rows per month in source and archive ..."
+			foreach ($r in @(Invoke-DbaQuery @connParams -Database $Database -Query "SELECT $bucketExpr AS P, COUNT_BIG(*) AS Cnt FROM [$Schema].[$Table] WHERE $rangePredicate GROUP BY $bucketExpr;" -QueryTimeout 0 -ErrorAction Stop -EnableException -As PSObject)) { $srcCountByPeriod[[int]$r.P] = [int64]$r.Cnt }
+			foreach ($r in @(Invoke-DbaQuery @connParams -Database $Database -Query "SELECT $bucketExpr AS P, COUNT_BIG(*) AS Cnt FROM $archiveFqn WHERE $rangePredicate GROUP BY $bucketExpr;" -QueryTimeout 0 -ErrorAction Stop -EnableException -As PSObject)) { $dstCountByPeriod[[int]$r.P] = [int64]$r.Cnt }
+		}
+
+		$copyBase = @{
+			Source              = $SqlInstance
+			SourceDatabase      = $Database
+			Destination         = $SqlInstance
+			DestinationDatabase = $ArchiveDatabaseName
+			Table               = "$Schema.$Table"
+			DestinationTable    = "$ArchiveSchemaName.$Table"
+			KeepIdentity        = $true
+			KeepNulls           = $true
+			EnableException     = $true
+			Confirm             = $false
+		}
+		if ($PSBoundParameters.ContainsKey('BatchSize')) { $copyBase['BatchSize'] = $BatchSize }
+		if ($SqlCredential) { $copyBase['SourceCredential'] = $SqlCredential; $copyBase['DestinationCredential'] = $SqlCredential }
+
+		$logKey = "SchemaName = N'$Schema' AND TableName = N'$Table' AND ArchiveDatabaseName = N'$ArchiveDatabaseName'"
+		function _SetMonthLog([int]$p, [string]$status, [int64]$rows)
+		{
+			$completedAt = if ($status -eq 'Completed') { 'SYSDATETIME()' } else { 'NULL' }
+			$sql = @"
+UPDATE dbo.sqm_ArchiveMonthLog SET Status = '$status', RowsArchived = $rows, CompletedAt = $completedAt WHERE $logKey AND YYYYMM = $p;
+IF @@ROWCOUNT = 0 INSERT dbo.sqm_ArchiveMonthLog (SchemaName, TableName, ArchiveDatabaseName, YYYYMM, Status, RowsArchived, CompletedAt)
+                  VALUES (N'$Schema', N'$Table', N'$ArchiveDatabaseName', $p, '$status', $rows, $completedAt);
+"@
+			Invoke-DbaQuery @connParams -Database $Database -Query $sql -ErrorAction Stop -EnableException | Out-Null
+		}
+
 		$progressActivity = "Archiving '$Schema.$Table' -> '$ArchiveDatabaseName.$ArchiveSchemaName.$Table'"
+		$runWatch = [System.Diagnostics.Stopwatch]::StartNew()
 		foreach ($period in $pendingPeriods)
 		{
 			$periodIndex++
 			$percentComplete = if ($totalPeriodsToProcess -gt 0) { [int](100 * ($periodIndex - 1) / $totalPeriodsToProcess) } else { 0 }
-			Write-Progress -Activity $progressActivity -Status "Period $period ($periodIndex of $totalPeriodsToProcess) - $totalRows row(s) archived so far" -PercentComplete $percentComplete
-			Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Archiving period $period ($periodIndex of $totalPeriodsToProcess) ..."
+			Write-Progress -Id 1 -Activity $progressActivity -Status "Period $period ($periodIndex of $totalPeriodsToProcess) - $totalRows row(s) archived so far" -PercentComplete $percentComplete
 
 			$isOpenPeriod = $IncludeOpenPeriods -and $period -ge $currentPeriod
-			if ($isOpenPeriod)
+			$predicate = _PeriodPredicate $period (_NextPeriod $period)
+			$srcCount = if ($srcCountByPeriod.ContainsKey($period)) { $srcCountByPeriod[$period] } else { [int64]0 }
+			$dstCount = if ($dstCountByPeriod.ContainsKey($period)) { $dstCountByPeriod[$period] } else { [int64]0 }
+
+			# Abgeschlossener Monat mit identischer Zeilenzahl: schon (z.B. vor einem Abbruch) komplett
+			# uebertragen - nur noch im Log abschliessen. Offene Monate werden immer neu kopiert.
+			if (-not $isOpenPeriod -and $srcCount -eq $dstCount)
 			{
-				# Fortsetzpunkt des letzten Abgleichs verwerfen - der Monat wird von vorn gemergt, damit
-				# auch nachtraeglich eingefuegte Zeilen mit kleinerem Schluessel erfasst werden.
-				Invoke-DbaQuery @connParams -Database $Database -Query "DELETE FROM dbo.sqm_ArchiveMonthLog WHERE SchemaName = N'$Schema' AND TableName = N'$Table' AND ArchiveDatabaseName = N'$ArchiveDatabaseName' AND YYYYMM = $period;" -ErrorAction Stop -EnableException | Out-Null
+				_SetMonthLog $period 'Completed' $dstCount
+				Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Period $period ($periodIndex of $totalPeriodsToProcess): $dstCount row(s) already in archive - skipped."
+				Invoke-sqmLogging -Message "Monat $period : $dstCount Zeile(n) bereits vollstaendig im Archiv - uebersprungen." -FunctionName $functionName -Level "INFO"
+				continue
 			}
 
-			$monthComplete = $false
-			$rowsThisPeriod = 0
-			while (-not $monthComplete)
+			Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Archiving period $period ($periodIndex of $totalPeriodsToProcess): $srcCount row(s) ..."
+			_SetMonthLog $period 'InProgress' 0
+
+			# Teilbestand eines abgebrochenen Laufs (oder offener Monat) im Archiv: erst leeren, sonst
+			# entstuenden Duplikate. In Batches, damit das Log der Archiv-DB nicht explodiert.
+			if ($dstCount -gt 0)
 			{
-				$batchSql = @"
-DECLARE @RowsThisCall BIGINT, @MonthComplete BIT;
-EXEC dbo.sqm_ArchiveMonthBatch
-    @SchemaName = N'$Schema', @TableName = N'$Table', @DateColumn = N'$DateColumn', @KeyColumns = N'$keyColumnsCsv',
-    @YYYYMM = $period, @BoundaryType = N'$BoundaryType', @SurrogateDateFormat = N'$SurrogateDateFormat',
-    @ArchiveDatabaseName = N'$ArchiveDatabaseName', @ArchiveSchemaName = N'$ArchiveSchemaName',
-    @ArchiveTableName = N'$Table', @BatchSize = $BatchSize,
-    @RowsThisCall = @RowsThisCall OUTPUT, @MonthComplete = @MonthComplete OUTPUT;
-SELECT @RowsThisCall AS RowsThisCall, @MonthComplete AS MonthComplete;
-"@
-				$batchResult = Invoke-DbaQuery @connParams -Database $Database -Query $batchSql -ErrorAction Stop -EnableException -As PSObject
-				if (-not $batchResult -or $null -eq $batchResult[0]) { throw "sqm_ArchiveMonthBatch returned no result set." }
-				$rowsThisCall = [int64]$(if ($null -ne $batchResult[0].RowsThisCall) { $batchResult[0].RowsThisCall } else { 0 })
-				$monthComplete = [bool]$(if ($null -ne $batchResult[0].MonthComplete) { $batchResult[0].MonthComplete } else { $false })
-				$totalRows += $rowsThisCall
-				$rowsThisPeriod += $rowsThisCall
-				Invoke-sqmLogging -Message "Monat $period : $rowsThisCall Zeile(n) in diesem Batch verarbeitet - $(if ($monthComplete) { 'Monat abgeschlossen' } else { 'weitere Batches folgen' })." -FunctionName $functionName -Level "INFO"
-				Write-Progress -Activity $progressActivity -Status "Period $period ($periodIndex of $totalPeriodsToProcess) - $rowsThisPeriod row(s) this period, $totalRows total so far" -PercentComplete $percentComplete
+				$deleted = 0
+				do
+				{
+					$n = [int64](Invoke-DbaQuery @connParams -Database $Database -Query "DELETE TOP (100000) FROM $archiveFqn WHERE $predicate; SELECT @@ROWCOUNT AS Cnt;" -QueryTimeout 0 -ErrorAction Stop -EnableException -As PSObject)[0].Cnt
+					$deleted += $n
+				} while ($n -gt 0)
+				Invoke-sqmLogging -Message "Monat $period : $deleted vorhandene Zeile(n) im Archiv geloescht vor Neukopie." -FunctionName $functionName -Level "WARNING"
 			}
-			Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Period $period done: $rowsThisPeriod row(s) archived (running total: $totalRows)."
+
+			$periodWatch = [System.Diagnostics.Stopwatch]::StartNew()
+			$copyResult = @(Copy-sqmTableData @copyBase -SourceQuery "SELECT * FROM [$Schema].[$Table] WHERE $predicate") | Select-Object -First 1
+			$periodWatch.Stop()
+			if (-not $copyResult -or $copyResult.Status -ne 'Success') { throw "Monat $period konnte nicht kopiert werden: $(if ($copyResult) { $copyResult.Message } else { 'kein Ergebnis von Copy-sqmTableData' })" }
+
+			$archCount = [int64](Invoke-DbaQuery @connParams -Database $Database -Query "SELECT COUNT_BIG(*) AS Cnt FROM $archiveFqn WHERE $predicate;" -QueryTimeout 0 -ErrorAction Stop -EnableException -As PSObject)[0].Cnt
+			if (-not $isOpenPeriod -and $archCount -ne $srcCount)
+			{
+				# Snapshot vom Laufbeginn kann veraltet sein (z.B. nachtraeglich eingefuegte Zeilen) -
+				# erst mit der aktuellen Quellzahl vergleichen, bevor ein Fehler gemeldet wird.
+				$srcNow = [int64](Invoke-DbaQuery @connParams -Database $Database -Query "SELECT COUNT_BIG(*) AS Cnt FROM [$Schema].[$Table] WHERE $predicate;" -QueryTimeout 0 -ErrorAction Stop -EnableException -As PSObject)[0].Cnt
+				if ($archCount -ne $srcNow) { throw "Monat $period : Zeilenzahl nach dem Kopieren weicht ab (Quelle $srcNow, Archiv $archCount) - Monat bleibt 'InProgress', ein erneuter Aufruf kopiert ihn neu." }
+			}
+			_SetMonthLog $period $(if ($isOpenPeriod) { 'InProgress' } else { 'Completed' }) $archCount
+
+			$rowsThisPeriod = $archCount
+			$totalRows += $rowsThisPeriod
+			$rate = if ($periodWatch.Elapsed.TotalSeconds -gt 0) { [int64]($rowsThisPeriod / $periodWatch.Elapsed.TotalSeconds) } else { 0 }
+			Invoke-sqmLogging -Message "Monat $period : $rowsThisPeriod Zeile(n) in $([math]::Round($periodWatch.Elapsed.TotalSeconds, 1)) s archiviert ($rate Zeilen/s)." -FunctionName $functionName -Level "INFO"
+			Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Period $period done: $rowsThisPeriod row(s) in $([math]::Round($periodWatch.Elapsed.TotalSeconds, 1)) s ($rate rows/s, running total: $totalRows)."
 
 			# ---------------------------------------------------------------------------------------
 			# 5b. Optional (-PurgeSourceAfterArchive): abgeschlossenen Monat aus der Quelle loeschen,
@@ -865,7 +948,7 @@ SELECT @RowsThisCall AS RowsThisCall, @MonthComplete AS MonthComplete;
 				}
 			}
 		}
-		if ($totalPeriodsToProcess -gt 0) { Write-Progress -Activity $progressActivity -Completed }
+		if ($totalPeriodsToProcess -gt 0) { Write-Progress -Id 1 -Activity $progressActivity -Completed }
 
 		$cutoverPerformed = Invoke-CutoverIfRequested
 

@@ -37,12 +37,13 @@
        anlegen (New-sqmPartitionFilegroupPlan/New-sqmPartitionSchemeSet) und die Zieltabelle
        strukturell identisch zur Quelle anlegen (Get-sqmTableDefinitionSql), aber auf dem neuen
        Scheme statt der alten Filegroup(s).
-    4. Batchweise, resumable Kopie ALLER Zeilen (gleiches Muster wie Invoke-sqmTableRelocation:
-       Keyset-Pagination ueber -KeyColumn (eine Spalte oder ein Tupel aus bis zu 5 Spalten), jeder
-       Batch eine eigene kleine Transaktion, Fortsetzpunkt = letztes Schluesseltupel in der
-       Zieltabelle - ein abgebrochener Lauf oder -MaxDurationMinutes kann
-       jederzeit per erneutem Aufruf fortgesetzt werden, dabei wird Schritt 3 uebersprungen, wenn die
-       Zieltabelle bereits existiert).
+    4. Kopie ALLER Zeilen mit den Kopierroutinen von sqmDataTransfer (Copy-sqmTableData
+       -SourceQuery, SqlBulkCopy - dieselbe Strecke wie Invoke-sqmChunkedTableTransfer), ein Chunk
+       je Partition der NEUEN Zieltabelle, mit Fortschritt und Durchsatz je Partition. Fortsetzen
+       nach Abbruch oder -MaxDurationMinutes per erneutem Aufruf: Partitionen mit gleicher
+       Zeilenzahl in Quelle und Ziel werden uebersprungen, eine Partition mit abweichender Zahl wird
+       im Ziel geleert und neu kopiert (kein Schluessel noetig). Schritt 3 wird uebersprungen, wenn
+       die Zieltabelle bereits existiert.
     5. Nach vollstaendiger Kopie: Zeilenzahl-Abgleich Quelle/Ziel, optionale Kompression
        (nur beim allerersten Aufruf, analog Invoke-sqmTablePartitionConversion), Registrierung der
        NEUEN Tabelle in sqm_PartitionRegistry (Register-sqmPartitionTable), ausser -NoRegister.
@@ -85,20 +86,15 @@
     None (Standard), Row oder Page. Wird nur beim allerersten Aufruf (Anlage der Zielkopie)
     angewendet, analog Invoke-sqmTablePartitionConversion.
 .PARAMETER KeyColumn
-    Eine oder mehrere (max. 5) Spalten fuer die Batch-Reihenfolge/den Fortsetzpunkt, die ZUSAMMEN
-    jede Zeile eindeutig identifizieren (z.B. -KeyColumn 'VMTG', 'VID1', 'VID2', 'VSEQ', 'VPOS'),
-    NICHT notwendigerweise identisch mit -PartitionColumn. Keine der Spalten darf NULL enthalten.
-    Ohne Angabe automatisch: eindeutiger Clustered Index, PK oder Unique Index mit 1-5 NOT-NULL-
-    Spalten (Clustered bevorzugt), sonst ein einspaltiger Clustered Index. Bei einem Heap ohne
-    solchen Index ist die explizite Angabe Pflicht.
-    Bei mehreren Spalten wird ueber das Tupel (K1, K2, ...) geblaettert - ein passender Index auf
-    genau diesen Spalten (in dieser Reihenfolge) haelt jeden Batch billig.
+    Veraltet, wird ignoriert (seit 1.15.0.0 wird partitionsweise per SqlBulkCopy kopiert, dafuer ist
+    kein Schluessel noetig). Bleibt nur, damit bestehende Aufrufe nicht brechen.
 .PARAMETER BatchSize
-    Zeilen pro Batch/Transaktion. Standard: 50000.
+    SqlBulkCopy-Batchgroesse. Ohne Angabe gilt die Standard-Batchgroesse von sqmDataTransfer
+    (Get-sqmTransferConfig DefaultBatchSize, Standard 500000).
 .PARAMETER MaxDurationMinutes
-    Bricht nach dieser Laufzeit sauber zwischen zwei Batches ab (0 = kein Limit, Standard) - fuer
-    die gezielte Aufteilung sehr grosser Tabellen auf mehrere Wartungsfenster. Ein erneuter Aufruf
-    setzt automatisch beim letzten kopierten Schluesselwert fort.
+    Bricht nach dieser Laufzeit sauber zwischen zwei Partitionen ab (0 = kein Limit, Standard) -
+    fuer die gezielte Aufteilung sehr grosser Tabellen auf mehrere Wartungsfenster. Ein erneuter
+    Aufruf setzt bei der ersten noch nicht vollstaendigen Partition fort.
 .PARAMETER NoRegister
     Neue Tabelle NICHT in sqm_PartitionRegistry eintragen (z.B. fuer einen einmaligen Testabzug
     ohne automatische Wartungs-Jobs).
@@ -117,7 +113,7 @@
         -TargetDatabaseName "SalesReporting" -Granularity Quarter -MaxDurationMinutes 90
 
 .NOTES
-    Benoetigt: dbatools, Invoke-sqmLogging (sqmSQLTool), Get-sqmPartitionColumnRange,
+    Benoetigt: dbatools, Invoke-sqmLogging (sqmSQLTool), Copy-sqmTableData (sqmDataTransfer), Get-sqmPartitionColumnRange,
     Get-sqmPartitionBoundaryList, New-sqmPartitionFilegroupPlan, New-sqmPartitionSchemeSet,
     Get-sqmTableDefinitionSql (privat), Register-sqmPartitionTable. Zieldatenbank muss bereits
     existieren (wird nicht automatisch angelegt). Erneuter Aufruf ist jederzeit sicher (resumable) -
@@ -176,7 +172,6 @@ function Copy-sqmPartitionedTable
 		[string]$DataCompression = 'None',
 
 		[Parameter(Mandatory = $false)]
-		[ValidateCount(1, 5)]
 		[string[]]$KeyColumn,
 
 		[Parameter(Mandatory = $false)]
@@ -198,6 +193,7 @@ function Copy-sqmPartitionedTable
 	)
 
 	$functionName = $MyInvocation.MyCommand.Name
+	if ($KeyColumn) { Write-Warning "-KeyColumn wird seit sqmPartitionTool 1.15.0.0 ignoriert (partitionsweise Kopie per SqlBulkCopy braucht keinen Schluessel)." }
 	$connParams = @{ SqlInstance = $SqlInstance }
 	if ($SqlCredential) { $connParams['SqlCredential'] = $SqlCredential }
 	if (-not $TargetSchemaName) { $TargetSchemaName = $Schema }
@@ -216,47 +212,6 @@ function Copy-sqmPartitionedTable
 			'nvarchar'  { return $(if ([int]$col.max_length -eq -1) { 'nvarchar(max)' } else { "nvarchar($([int]$col.max_length / 2))" }) }
 			default     { return $col.TypeName }
 		}
-	}
-
-	function _FormatKeyLiteral($value, [string]$typeName)
-	{
-		if ($null -eq $value -or $value -is [System.DBNull]) { return 'NULL' }
-		$inv = [System.Globalization.CultureInfo]::InvariantCulture
-		# 'yyyyMMdd' statt 'yyyy-MM-dd' - DATEFORMAT-unabhaengig, siehe Kommentar in
-		# New-sqmPartitionSchemeSet.ps1 (sonst Resume-Punkt falsch bei einer DATETIME-KeyColumn
-		# und dmy-Login). Gebrochene Sekunden passend zum Typ: ein 7-stelliges Literal laesst sich
-		# nicht in datetime konvertieren (Fehler 241), und ein auf datetime2 erweiterter
-		# datetime-Wert (.0033333) waere groesser als das Literal (.003) -> letzte Zeile doppelt.
-		switch ($typeName)
-		{
-			'date'           { return "'$(([datetime]$value).ToString('yyyyMMdd', $inv))'" }
-			'smalldatetime'  { return "'$(([datetime]$value).ToString('yyyyMMdd HH:mm:ss', $inv))'" }
-			'datetime'       { return "CAST('$(([datetime]$value).ToString('yyyyMMdd HH:mm:ss.fff', $inv))' AS DATETIME)" }
-			'datetime2'      { return "'$(([datetime]$value).ToString('yyyyMMdd HH:mm:ss.fffffff', $inv))'" }
-			'datetimeoffset' { return "'$(([datetimeoffset]$value).ToString('yyyy-MM-ddTHH:mm:ss.fffffffzzz', $inv))'" }
-			'time'           { return "'$(([timespan]$value).ToString('hh\:mm\:ss\.fffffff', $inv))'" }
-			'bit'            { return $(if ([bool]$value) { '1' } else { '0' }) }
-			{ $_ -in @('binary', 'varbinary') } { return '0x' + (-join (([byte[]]$value) | ForEach-Object { $_.ToString('X2') })) }
-			{ $_ -in @('char', 'varchar', 'uniqueidentifier') } { return "'$("$value".Replace("'", "''"))'" }
-			{ $_ -in @('nchar', 'nvarchar') } { return "N'$("$value".Replace("'", "''"))'" }
-			{ $_ -in @('float', 'real') } { return ([double]$value).ToString('R', $inv) }
-			default          { return ([System.IFormattable]$value).ToString($null, $inv) }
-		}
-	}
-
-	# Tupel-Vergleich (K1, K2, ...) > (v1, v2, ...) als verschachtelter Ausdruck - eine reine
-	# UND-Verknuepfung von Einzelspalten-">" wuerde Zeilen ueberspringen (siehe sqm_ArchiveMonthBatch).
-	# Das aeussere "[K1] >= v1" gibt dem Optimizer einen Seek-Praedikat auf die fuehrende Spalte.
-	function _KeysetPredicate([object[]]$keyDefs, [object[]]$values)
-	{
-		$lits = @(for ($i = 0; $i -lt $keyDefs.Count; $i++) { _FormatKeyLiteral $values[$i] $keyDefs[$i].TypeName })
-		$expr = "[$($keyDefs[-1].ColumnName)] > $($lits[-1])"
-		for ($i = $keyDefs.Count - 2; $i -ge 0; $i--)
-		{
-			$expr = "[$($keyDefs[$i].ColumnName)] > $($lits[$i]) OR ([$($keyDefs[$i].ColumnName)] = $($lits[$i]) AND ($expr))"
-		}
-		if ($keyDefs.Count -eq 1) { return $expr }
-		return "[$($keyDefs[0].ColumnName)] >= $($lits[0]) AND ($expr)"
 	}
 
 	try
@@ -319,61 +274,6 @@ WHERE s.name = N'$Schema' AND t.name = N'$Table' AND c.name = N'$PartitionColumn
 		{
 			$BoundaryType = if ($typeName -in $dateTypes) { 'Date' } elseif ($typeName -in $textTypes) { 'Text' } else { 'Int' }
 			Invoke-sqmLogging -Message "BoundaryType nicht angegeben - aus Spaltentyp '$typeName' abgeleitet: $BoundaryType (SurrogateDateFormat: $SurrogateDateFormat)." -FunctionName $functionName -Level "INFO"
-		}
-
-		# =========================================================================================
-		# 2b. Schluesselspalte(n) fuer die Batch-Kopie - VOR dem Anlegen der Zieltabelle pruefen,
-		#     damit ein ungueltiger Schluessel keine leere Zieltabelle hinterlaesst
-		# =========================================================================================
-		$colDefQuery = @"
-SELECT c.name AS ColumnName, ty.name AS TypeName, c.max_length, c.precision, c.scale, c.is_nullable, c.is_identity
-FROM sys.columns c
-JOIN sys.types ty ON ty.user_type_id = c.user_type_id
-WHERE c.object_id = OBJECT_ID(N'[$Schema].[$Table]')
-ORDER BY c.column_id
-"@
-		$colDefs = Invoke-DbaQuery @connParams -Database $Database -Query $colDefQuery -ErrorAction Stop -EnableException -As PSObject
-		$hasIdentityCol = [bool]($colDefs | Where-Object { [bool]$_.is_identity })
-		$colList = ($colDefs | ForEach-Object { "[$($_.ColumnName)]" }) -join ', '
-
-		if (-not $KeyColumn)
-		{
-			$autoKey = Get-sqmCopyKeyColumn -ConnParams $connParams -Database $Database -Schema $Schema -Table $Table
-			if ($autoKey.Columns.Count -eq 0)
-			{
-				throw "'-KeyColumn' ist Pflicht: '$Schema.$Table' hat weder einen eindeutigen Index/PK mit 1-5 NOT-NULL-Spalten noch einen einspaltigen Clustered Index. Bitte die Spalte(n) angeben, die zusammen jede Zeile eindeutig identifizieren (max. 5)."
-			}
-			$KeyColumn = $autoKey.Columns
-			Invoke-sqmLogging -Message "-KeyColumn aus Index '$($autoKey.IndexName)' abgeleitet: $($KeyColumn -join ', ')." -FunctionName $functionName -Level "INFO"
-			if (-not $autoKey.IsUnique)
-			{
-				Invoke-sqmLogging -Message "Clustered Index '$($autoKey.IndexName)' ist NICHT eindeutig - bei doppelten Schluesselwerten an einer Batch-Grenze werden Zeilen uebersprungen (der Zeilenzahl-Abgleich am Ende meldet das). Fuer Sicherheit -KeyColumn mit eindeutigen Spalten angeben." -FunctionName $functionName -Level "WARNING"
-			}
-		}
-
-		$keyColDefs = @(foreach ($k in $KeyColumn)
-			{
-				$def = $colDefs | Where-Object { $_.ColumnName -eq $k } | Select-Object -First 1
-				if (-not $def) { throw "Schluesselspalte '$k' nicht in '$Schema.$Table' gefunden." }
-				$def
-			})
-		if (@($KeyColumn | Select-Object -Unique).Count -ne $KeyColumn.Count) { throw "'-KeyColumn' enthaelt eine Spalte mehrfach: $($KeyColumn -join ', ')." }
-		$keyList = ($KeyColumn | ForEach-Object { "[$_]" }) -join ', '
-		$keyListDesc = ($KeyColumn | ForEach-Object { "[$_] DESC" }) -join ', '
-		Invoke-sqmLogging -Message "Schluessel fuer die Batch-Kopie: $($KeyColumn -join ', ')$(if ($KeyColumn.Count -gt 1) { " (zusammengesetzt, $($KeyColumn.Count) Spalten)" })." -FunctionName $functionName -Level "INFO"
-
-		# Ein NULL in einer Schluesselspalte faellt durch jeden ">"-Vergleich - die Zeile wuerde nie
-		# kopiert. Nur NULL-faehige Spalten pruefen (bei NOT NULL kostet das nichts); fuer diese
-		# Spalten kann die Pruefung die Tabelle scannen, wenn kein Index sie abdeckt.
-		$nullableKeys = @($keyColDefs | Where-Object { [bool]$_.is_nullable } | ForEach-Object { $_.ColumnName })
-		if ($nullableKeys.Count -gt 0)
-		{
-			Invoke-sqmLogging -Message "Schluesselspalte(n) $($nullableKeys -join ', ') erlauben NULL - pruefe auf vorhandene NULL-Werte (ohne passenden Index ein Scan der Quelltabelle)." -FunctionName $functionName -Level "WARNING"
-			$nullCheck = "SELECT TOP (1) 1 AS HasNull FROM [$Schema].[$Table] WHERE " + (($nullableKeys | ForEach-Object { "[$_] IS NULL" }) -join ' OR ') + ';'
-			if (Invoke-DbaQuery @connParams -Database $Database -Query $nullCheck -ErrorAction Stop -EnableException -As PSObject)
-			{
-				throw "Schluesselspalte(n) $($nullableKeys -join ', ') enthalten NULL-Werte - diese Zeilen koennten nicht kopiert werden. Bitte -KeyColumn mit Spalten ohne NULL-Werte angeben."
-			}
 		}
 
 		# =========================================================================================
@@ -461,23 +361,81 @@ ORDER BY c.column_id
 		}
 
 		# =========================================================================================
-		# 5. Batchweise, resumable Kopie ALLER Zeilen (Muster wie Invoke-sqmTableRelocation)
+		# 5. Kopie ALLER Zeilen mit den Kopierroutinen von sqmDataTransfer (Copy-sqmTableData
+		#    -SourceQuery -> SqlBulkCopy, Namens-Mapping, Abbruch per Cancel, Fortschritt) - ein
+		#    Chunk je Partition der NEUEN Zieltabelle. Fortsetzen: Zeilenzahl je Partition in Quelle
+		#    und Ziel (je EIN GROUP BY-Scan ueber $PARTITION der Ziel-Function); gleiche Zahl ->
+		#    uebersprungen, abweichende Zahl -> Partition im Ziel leeren und neu kopieren. Kein
+		#    Schluessel noetig.
 		# =========================================================================================
-		# Fortsetzpunkt = Tupel der in Schluesselreihenfolge LETZTEN Zeile im Ziel - eine echte Zeile,
-		# kein spaltenweises MAX() (das ergaebe bei mehreren Spalten ein nie existierendes Tupel).
-		$resumeRow = @(Invoke-DbaQuery @connParams -Database $Database -Query "SELECT TOP (1) $keyList FROM [$TargetDatabaseName].[$TargetSchemaName].[$TargetTableName] ORDER BY $keyListDesc;" -ErrorAction Stop -EnableException -As PSObject)
-		$lastKeyValues = if ($resumeRow.Count -gt 0) { @(foreach ($k in $KeyColumn) { $resumeRow[0].$k }) } else { $null }
-		if ($null -ne $lastKeyValues) { Invoke-sqmLogging -Message "Fortsetzung ab ($($KeyColumn -join ', ')) > ($($lastKeyValues -join ', ')) (bereits kopierte Zeilen bleiben unberuehrt)." -FunctionName $functionName -Level "INFO" }
+		$tgtPfQuery = @"
+SELECT pf.name AS PartitionFunctionName, pf.boundary_value_on_right AS RangeRight
+FROM sys.indexes i
+JOIN sys.partition_schemes ps ON ps.data_space_id = i.data_space_id
+JOIN sys.partition_functions pf ON pf.function_id = ps.function_id
+WHERE i.object_id = OBJECT_ID(N'[$TargetSchemaName].[$TargetTableName]') AND i.index_id IN (0, 1);
+"@
+		$tgtPf = @(Invoke-DbaQuery @connParams -Database $TargetDatabaseName -Query $tgtPfQuery -ErrorAction Stop -EnableException -As PSObject) | Select-Object -First 1
+		if (-not $tgtPf) { throw "Zieltabelle '$TargetDatabaseName.$TargetSchemaName.$TargetTableName' ist nicht partitioniert - vermutlich ein abgebrochener frueherer Lauf. Tabelle pruefen und (wenn leer) loeschen, dann erneut starten." }
+		$pfName = [string]$tgtPf.PartitionFunctionName
+		$rangeRight = [bool]$tgtPf.RangeRight
+		$bounds = @(Invoke-DbaQuery @connParams -Database $TargetDatabaseName -Query "SELECT prv.value AS V FROM sys.partition_range_values prv JOIN sys.partition_functions pf ON pf.function_id = prv.function_id WHERE pf.name = N'$pfName' ORDER BY prv.boundary_id;" -ErrorAction Stop -EnableException -As PSObject | ForEach-Object { $_.V })
 
-		$keyVarCols = (1..$KeyColumn.Count | ForEach-Object { "[K$_] SQL_VARIANT" }) -join ', '
-		$keyOutCols = (1..$KeyColumn.Count | ForEach-Object { "INSERTED.[$($KeyColumn[$_ - 1])]" }) -join ', '
-		$keyVarList = (1..$KeyColumn.Count | ForEach-Object { "[K$_]" }) -join ', '
-		$keyVarDesc = (1..$KeyColumn.Count | ForEach-Object { "[K$_] DESC" }) -join ', '
+		function _BoundLiteral($v)
+		{
+			$inv = [System.Globalization.CultureInfo]::InvariantCulture
+			if ($v -is [datetime]) { return "'$($v.ToString('yyyy-MM-ddTHH:mm:ss.fff', $inv))'" }
+			if ($v -is [datetimeoffset]) { return "'$($v.ToString('yyyy-MM-ddTHH:mm:ss.fffffffzzz', $inv))'" }
+			if ($v -is [string]) { return "N'$($v.Replace("'", "''"))'" }
+			return ([System.IFormattable]$v).ToString($null, $inv)
+		}
+		# Partition k (1..n+1) als Bereichspraedikat auf der nackten Spalte (Index-Seek moeglich).
+		# NULL liegt bei RANGE RIGHT wie LEFT immer in Partition 1.
+		function _PartitionPredicate([int]$k)
+		{
+			$col = "[$PartitionColumn]"
+			$lo = if ($k -ge 2) { _BoundLiteral $bounds[$k - 2] } else { $null }
+			$hi = if ($k -le $bounds.Count) { _BoundLiteral $bounds[$k - 1] } else { $null }
+			$geLo = if ($rangeRight) { '>=' } else { '>' }
+			$ltHi = if ($rangeRight) { '<' } else { '<=' }
+			if ($null -eq $lo -and $null -eq $hi) { return '1 = 1' }
+			if ($null -eq $lo) { return "($col $ltHi $hi OR $col IS NULL)" }
+			if ($null -eq $hi) { return "$col $geLo $lo" }
+			return "$col $geLo $lo AND $col $ltHi $hi"
+		}
+
+		Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Counting rows per target partition in source and target ..."
+		$srcCountByPart = @{}
+		$dstCountByPart = @{}
+		$srcPartExpr = "[$TargetDatabaseName].`$PARTITION.[$pfName]([$PartitionColumn])"
+		foreach ($r in @(Invoke-DbaQuery @connParams -Database $Database -Query "SELECT $srcPartExpr AS P, COUNT_BIG(*) AS Cnt FROM [$Schema].[$Table] GROUP BY $srcPartExpr;" -QueryTimeout 0 -ErrorAction Stop -EnableException -As PSObject)) { $srcCountByPart[[int]$r.P] = [int64]$r.Cnt }
+		foreach ($r in @(Invoke-DbaQuery @connParams -Database $TargetDatabaseName -Query "SELECT `$PARTITION.[$pfName]([$PartitionColumn]) AS P, COUNT_BIG(*) AS Cnt FROM [$TargetSchemaName].[$TargetTableName] GROUP BY `$PARTITION.[$pfName]([$PartitionColumn]);" -QueryTimeout 0 -ErrorAction Stop -EnableException -As PSObject)) { $dstCountByPart[[int]$r.P] = [int64]$r.Cnt }
+
+		$copyBase = @{
+			Source              = $SqlInstance
+			SourceDatabase      = $Database
+			Destination         = $SqlInstance
+			DestinationDatabase = $TargetDatabaseName
+			Table               = "$Schema.$Table"
+			DestinationTable    = "$TargetSchemaName.$TargetTableName"
+			KeepIdentity        = $true
+			KeepNulls           = $true
+			EnableException     = $true
+			Confirm             = $false
+		}
+		if ($PSBoundParameters.ContainsKey('BatchSize')) { $copyBase['BatchSize'] = $BatchSize }
+		if ($SqlCredential) { $copyBase['SourceCredential'] = $SqlCredential; $copyBase['DestinationCredential'] = $SqlCredential }
+
+		$partCount = $bounds.Count + 1
+		$toCopy = @(1..$partCount | Where-Object { $s = if ($srcCountByPart.ContainsKey($_)) { $srcCountByPart[$_] } else { 0 }; $d = if ($dstCountByPart.ContainsKey($_)) { $dstCountByPart[$_] } else { 0 }; $s -ne $d })
+		Write-Host "[$(Get-Date -Format 'HH:mm:ss')] $partCount partition(s), $($toCopy.Count) to copy, $($partCount - $toCopy.Count) already complete or empty."
 
 		$sw = [System.Diagnostics.Stopwatch]::StartNew()
 		$totalCopied = 0
 		$timeBudgetHit = $false
-		while ($true)
+		$chunkIndex = 0
+		$progressActivity = "Copying '$Schema.$Table' -> '$TargetDatabaseName.$TargetSchemaName.$TargetTableName'"
+		foreach ($k in $toCopy)
 		{
 			if ($MaxDurationMinutes -gt 0 -and $sw.Elapsed.TotalMinutes -ge $MaxDurationMinutes)
 			{
@@ -485,33 +443,36 @@ ORDER BY c.column_id
 				Invoke-sqmLogging -Message "Zeitbudget ($MaxDurationMinutes Min.) erreicht - $totalCopied Zeile(n) in diesem Lauf kopiert. Erneuter Aufruf setzt automatisch fort." -FunctionName $functionName -Level "WARNING"
 				break
 			}
+			$chunkIndex++
+			$predicate = _PartitionPredicate $k
+			$srcCnt = if ($srcCountByPart.ContainsKey($k)) { $srcCountByPart[$k] } else { [int64]0 }
+			$dstCnt = if ($dstCountByPart.ContainsKey($k)) { $dstCountByPart[$k] } else { [int64]0 }
+			Write-Progress -Id 1 -Activity $progressActivity -Status "Partition $k ($chunkIndex of $($toCopy.Count)) - $totalCopied row(s) copied so far" -PercentComplete ([int](100 * ($chunkIndex - 1) / $toCopy.Count))
+			Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Partition $k ($chunkIndex of $($toCopy.Count)): $srcCnt row(s) ..."
 
-			$whereClause = if ($null -eq $lastKeyValues) { '' } else { "WHERE $(_KeysetPredicate $keyColDefs $lastKeyValues)" }
-			# Neuer Fortsetzpunkt = in Schluesselreihenfolge groesstes Tupel des Batches; da der Batch
-			# genau die TOP-n-Tupel ab dem alten Fortsetzpunkt enthaelt, ist das die letzte echte Zeile.
-			$batchSql = @"
-DECLARE @KeyTable TABLE ($keyVarCols);
-INSERT INTO [$TargetDatabaseName].[$TargetSchemaName].[$TargetTableName] ($colList)
-OUTPUT $keyOutCols INTO @KeyTable
-SELECT TOP ($BatchSize) $colList FROM [$Schema].[$Table] $whereClause ORDER BY $keyList;
-SELECT n.Cnt, k.* FROM (SELECT COUNT(*) AS Cnt FROM @KeyTable) n
-OUTER APPLY (SELECT TOP (1) $keyVarList FROM @KeyTable ORDER BY $keyVarDesc) k;
-"@
-			$batchSql = if ($hasIdentityCol)
+			if ($dstCnt -gt 0)
 			{
-				"SET IDENTITY_INSERT [$TargetDatabaseName].[$TargetSchemaName].[$TargetTableName] ON; $batchSql SET IDENTITY_INSERT [$TargetDatabaseName].[$TargetSchemaName].[$TargetTableName] OFF;"
+				# Rest eines abgebrochenen Laufs - erst leeren, sonst Duplikate. In Batches wegen Log.
+				$deleted = 0
+				do
+				{
+					$n = [int64](Invoke-DbaQuery @connParams -Database $TargetDatabaseName -Query "DELETE TOP (100000) FROM [$TargetSchemaName].[$TargetTableName] WHERE $predicate; SELECT @@ROWCOUNT AS Cnt;" -QueryTimeout 0 -ErrorAction Stop -EnableException -As PSObject)[0].Cnt
+					$deleted += $n
+				} while ($n -gt 0)
+				Invoke-sqmLogging -Message "Partition $k : $deleted vorhandene Zeile(n) im Ziel geloescht vor Neukopie." -FunctionName $functionName -Level "WARNING"
 			}
-			else { $batchSql }
 
-			$batchResult = Invoke-DbaQuery @connParams -Database $Database -Query $batchSql -ErrorAction Stop -EnableException -As PSObject
-			if (-not $batchResult -or -not $batchResult[0]) { throw "Batch-Abfrage gab kein Ergebnis zurueck." }
-			$rowsThisBatch = [int64]$(if ($null -ne $batchResult[0].Cnt) { $batchResult[0].Cnt } else { 0 })
-			if ($rowsThisBatch -eq 0) { break }
-
-			$lastKeyValues = @(1..$KeyColumn.Count | ForEach-Object { $batchResult[0]."K$_" })
-			$totalCopied += $rowsThisBatch
-			Invoke-sqmLogging -Message "$totalCopied Zeile(n) kopiert (Batch: $rowsThisBatch, letzter Schluessel: $($lastKeyValues -join ', '))." -FunctionName $functionName -Level "INFO"
+			$partWatch = [System.Diagnostics.Stopwatch]::StartNew()
+			$copyResult = @(Copy-sqmTableData @copyBase -SourceQuery "SELECT * FROM [$Schema].[$Table] WHERE $predicate") | Select-Object -First 1
+			$partWatch.Stop()
+			if (-not $copyResult -or $copyResult.Status -ne 'Success') { throw "Partition $k konnte nicht kopiert werden: $(if ($copyResult) { $copyResult.Message } else { 'kein Ergebnis von Copy-sqmTableData' })" }
+			$rows = [int64]$copyResult.RowsCopied
+			$totalCopied += $rows
+			$rate = if ($partWatch.Elapsed.TotalSeconds -gt 0) { [int64]($rows / $partWatch.Elapsed.TotalSeconds) } else { 0 }
+			Invoke-sqmLogging -Message "Partition $k : $rows Zeile(n) in $([math]::Round($partWatch.Elapsed.TotalSeconds, 1)) s kopiert ($rate Zeilen/s)." -FunctionName $functionName -Level "INFO"
+			Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Partition $k done: $rows row(s) in $([math]::Round($partWatch.Elapsed.TotalSeconds, 1)) s ($rate rows/s, running total: $totalCopied)."
 		}
+		if ($toCopy.Count -gt 0) { Write-Progress -Id 1 -Activity $progressActivity -Completed }
 
 		if ($timeBudgetHit)
 		{

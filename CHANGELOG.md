@@ -1,5 +1,46 @@
 ﻿# sqmPartitionTool — Changelog
 
+## [1.15.0.0] — 2026-10-01
+
+### Datenuebertragung ueber die Kopierroutinen von sqmDataTransfer
+
+Archiv-Migration, Kopie bereits partitionierter Tabellen und Relocation kopierten mit eigener
+T-SQL-Batchlogik (MERGE-Batches per `sqm_ArchiveMonthBatch` bzw. Keyset-`INSERT ... SELECT TOP`).
+Ohne passenden Index las jeder Batch die ganze Tabelle, und auf der Konsole kam stundenlang keine
+Rueckmeldung. Jetzt laufen alle drei ueber dieselbe, im Produktivbetrieb bewaehrte Strecke wie der
+Chunk-Transfer von sqmDataTransfer (`Copy-sqmTableData -SourceQuery` / `Invoke-sqmChunkedTableTransfer`:
+SqlBulkCopy, Namens-Mapping, Abbruch per Cancel, Columnstore-Deckel, Fortschritt).
+
+- **`Invoke-sqmTableArchiveMigration`**: ein Chunk pro Monat. Je EIN GROUP BY-Scan zaehlt die Zeilen
+  pro Monat in Quelle und Archiv; ein Monat mit gleicher Zahl wird uebersprungen, ein Monat mit
+  abweichender Zahl (Rest eines Abbruchs) im Archiv geleert und neu kopiert. 'Completed' im Log erst
+  nach der Zeilenzahl-Pruefung; offene Monate (`-IncludeOpenPeriods`) bleiben 'InProgress' und
+  werden bei jedem Lauf neu kopiert (erfasst auch geaenderte Zeilen). Konsole: Zeilen, Dauer und
+  Zeilen/s je Monat. Ein Schluessel ist nur noch fuer den atomaren Cutover mit
+  `-IncludeOpenPeriods` noetig; ein Heap ohne Schluessel ist sonst kein Abbruchgrund mehr.
+- **`Copy-sqmPartitionedTable`**: ein Chunk pro Partition der neuen Zieltabelle, Zaehlung per
+  `$PARTITION` der Ziel-Function, Fortsetzen wie oben. `-KeyColumn` wird ignoriert (Warnung) -
+  die zusammengesetzten Schluessel aus 1.13.0.0 sind fuer diesen Modus nicht mehr noetig;
+  GUI-Schluesselauswahl im Copy-Modus und `Get-sqmCopyKeyColumn` entfernt.
+- **`Invoke-sqmTableRelocation`**: `Invoke-sqmChunkedTableTransfer` mit automatisch erkannter
+  Chunk-Spalte (Datum/Periode/yyyyMMdd, monatsweise); ohne geeignete Spalte die ganze Tabelle in
+  einem `Copy-sqmTableData`-Durchgang. `-MaxDurationMinutes` wird ignoriert (Lauf ist pro Chunk
+  fortsetzbar), `-KeyColumn` dient nur noch dem Clustered Index der neuen Zieltabelle.
+- `-BatchSize` ohne Angabe: Standard von sqmDataTransfer (500000) statt 50000.
+- Neue Abhaengigkeit **sqmDataTransfer >= 0.1.22.0** (RequiredModules, Install.ps1 prueft
+  Vorhandensein und Version wie bei sqmSQLTool).
+
+Bewusst unveraendert: `Invoke-sqmPartitionArchive` (Staging -> Archiv derselben Instanz per
+`DELETE ... OUTPUT INTO`, transaktional je Batch, laeuft unbeaufsichtigt im Retention-Job) und die
+In-Place-Umwandlung `NewTableSwap` (`INSERT ... WITH (TABLOCK)` innerhalb derselben Datenbank).
+Ueber den Client per SqlBulkCopy waeren beide nur ein zusaetzlicher Netzweg.
+
+Live-verifiziert auf DEV01 (PS 5.1), Inhaltsvergleich per EXCEPT in beide Richtungen jeweils 0:
+Archiv-Migration CARCHIVE (10 Monate, simulierter Abbruch im Maerz -> nur Maerz neu, Nachzuegler
+und Aenderung im Oktober uebernommen), Purge + atomarer Cutover auf einer Kopie, Copy einer
+partitionierten Tabelle in Quartals-Partitionen inkl. Fortsetzen nach Teilverlust, Relocation mit
+Chunk-Spalte und im Ein-Durchgang-Fallback (IDENTITY erhalten).
+
 ## [1.14.0.0] — 2026-10-01
 
 ### `Invoke-sqmTableArchiveMigration -IncludeOpenPeriods`: transfer ALL data, including the current month

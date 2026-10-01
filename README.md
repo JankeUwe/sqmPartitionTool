@@ -5,7 +5,9 @@ Teil der [powershelldba.de](https://www.powershelldba.de) SQL-Server-Tools von [
 Automatische SQL-Server-Tabellen-Partitionierung — GUI und CLI.
 
 Baut auf [dbatools](https://dbatools.io) und [sqmSQLTool](https://github.com/JankeUwe/sqmSQLTool)
-auf (Logging, Konfiguration, WinForms-Theme werden von sqmSQLTool wiederverwendet).
+auf (Logging, Konfiguration, WinForms-Theme werden von sqmSQLTool wiederverwendet). Daten werden
+mit den Kopierroutinen von [sqmDataTransfer](https://github.com/JankeUwe/sqmDataTransfer) uebertragen
+(SqlBulkCopy, chunkweise, fortsetzbar).
 
 ## Funktionsumfang
 
@@ -36,6 +38,7 @@ auf (Logging, Konfiguration, WinForms-Theme werden von sqmSQLTool wiederverwende
 - PowerShell 5.1+
 - Modul `dbatools`
 - Modul `sqmSQLTool`
+- Modul `sqmDataTransfer` (ab 0.1.22.0)
 
 ## Installation
 
