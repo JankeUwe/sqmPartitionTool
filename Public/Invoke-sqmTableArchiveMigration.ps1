@@ -69,7 +69,7 @@
 .PARAMETER KeyColumn
     Eine oder mehrere Spalten (in dieser Reihenfolge, max. 5) fuer den MERGE-Abgleich und die
     Keyset-Pagination - muessen als TUPEL eindeutig sein. Zusammengesetzte Schluessel sind erlaubt,
-    z.B. -KeyColumn 'VMTG', 'VID1', 'VID2', 'VSEQ'. Ohne Angabe wird automatisch die vollstaendige
+    z.B. -KeyColumn 'BOOKCODE', 'ID1', 'ID2', 'SEQ'. Ohne Angabe wird automatisch die vollstaendige
     Schluesselspalten-Liste (in key_ordinal-Reihenfolge) des Clustered Index/PK verwendet - Pflicht
     nur bei einem echten Heap (kein Clustered Index) oder mehr als 5 Schluesselspalten.
 .PARAMETER Granularity
@@ -88,7 +88,7 @@
 .PARAMETER FutureBufferPeriods
     Durchgereicht an Invoke-sqmTablePartitionConversion. Standard: 3.
 .PARAMETER BoundaryType
-    Date (echtes DATE/DATETIME), Int (numerischer Surrogatschluessel, z.B. CORO_DB.dbo.CARCHIVE.VTDAT)
+    Date (echtes DATE/DATETIME), Int (numerischer Surrogatschluessel, z.B. Sales.dbo.Bookings.BOOKDATE)
     oder Text (char/varchar-Surrogatschluessel mit demselben Zahlenformat als String). Steuert sowohl
     die Perioden-Erkennung/-Grenzen dieser Funktion als auch (durchgereicht)
     Invoke-sqmTablePartitionConversion fuer die Archiv-Kopie. Ohne Angabe automatische Ableitung aus
@@ -496,11 +496,11 @@ WHERE i.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND c.name = N'$DateColumn'
 		# 1c. BoundaryType von $DateColumn ermitteln (falls nicht angegeben) - gleiche Herleitung
 		#     wie Invoke-sqmTablePartitionConversion.ps1 (Date/Datetime-Typen -> 'Date',
 		#     Char/Varchar/Nchar/Nvarchar -> 'Text' [Surrogat im -SurrogateDateFormat als String],
-		#     sonst -> 'Int' [Surrogat als Ganzzahl, z.B. CORO_DB.dbo.CARCHIVE.VTDAT]). Noetig, weil
+		#     sonst -> 'Int' [Surrogat als Ganzzahl, z.B. Sales.dbo.Bookings.BOOKDATE]). Noetig, weil
 		#     sowohl die Start/EndPeriod-Ableitung aus dem Quellwertebereich als auch die an
 		#     Monats-Chunks uebergebenen Periodengrenzen sonst blind einen echten
 		#     DATE/DATETIME-Typ voraussetzen wuerden - schlaegt bei einem YYYYMMDD-Surrogat wie
-		#     VTDAT sonst mit "date ist inkompatibel mit int" fehl (live gegen CARCHIVE bestaetigt).
+		#     BOOKDATE sonst mit "date ist inkompatibel mit int" fehl (live gegen Bookings bestaetigt).
 		# ---------------------------------------------------------------------------------------
 		$dateColTypeQuery = "SELECT ty.name AS TypeName FROM sys.columns c JOIN sys.types ty ON ty.user_type_id = c.user_type_id WHERE c.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND c.name = N'$DateColumn';"
 		$dateColTypeRow = Invoke-DbaQuery @connParams -Database $Database -Query $dateColTypeQuery -ErrorAction Stop -EnableException -As PSObject

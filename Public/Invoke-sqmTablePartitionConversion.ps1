@@ -163,11 +163,11 @@
         -FilegroupStrategy PerPeriod -AllowKeyChange -Online
 
 .EXAMPLE
-    # Heap mit eindeutigem Nonclustered Index (VTDAT,VMTG,VID1,VID2,VSEQ): daraus wird der
+    # Heap mit eindeutigem Nonclustered Index (BOOKDATE,BOOKCODE,ID1,ID2,SEQ): daraus wird der
     # Clustered PK auf dem Partition Scheme, in einem Durchgang
-    Invoke-sqmTablePartitionConversion -SqlInstance "SQL01" -Database "CORO_DB" -Schema "dbo" `
-        -Table "CARCHIVE" -PartitionColumn "VTDAT" -Granularity Month -BoundaryType Int `
-        -PrimaryKeyFromUniqueIndex "IX_Carchive"
+    Invoke-sqmTablePartitionConversion -SqlInstance "SQL01" -Database "Sales" -Schema "dbo" `
+        -Table "Bookings" -PartitionColumn "BOOKDATE" -Granularity Month -BoundaryType Int `
+        -PrimaryKeyFromUniqueIndex "UX_Bookings"
 
 .NOTES
     Benoetigt: dbatools, Invoke-sqmLogging (sqmSQLTool), alle uebrigen sqmPartitionTool-Core-

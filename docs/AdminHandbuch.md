@@ -287,7 +287,7 @@ Bei `Int`/`Text` steuert `-SurrogateDateFormat` die Genauigkeit:
   auf Monatsebene gefuehrt wird).
 
 Ein bekanntes reales Beispiel: eine Tabelle mit einer `INT`-Spalte im Format `YYYYMMDD` (z.B.
-`VTDAT`) braucht `-BoundaryType Int` (oder automatische Ableitung, falls kein anderer Typ
+`BOOKDATE`) braucht `-BoundaryType Int` (oder automatische Ableitung, falls kein anderer Typ
 zutreffen wuerde).
 
 ---

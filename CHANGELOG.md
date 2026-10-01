@@ -36,7 +36,7 @@ In-Place-Umwandlung `NewTableSwap` (`INSERT ... WITH (TABLOCK)` innerhalb dersel
 Ueber den Client per SqlBulkCopy waeren beide nur ein zusaetzlicher Netzweg.
 
 Live-verifiziert auf DEV01 (PS 5.1), Inhaltsvergleich per EXCEPT in beide Richtungen jeweils 0:
-Archiv-Migration CARCHIVE (10 Monate, simulierter Abbruch im Maerz -> nur Maerz neu, Nachzuegler
+Archiv-Migration Bookings (10 Monate, simulierter Abbruch im Maerz -> nur Maerz neu, Nachzuegler
 und Aenderung im Oktober uebernommen), Purge + atomarer Cutover auf einer Kopie, Copy einer
 partitionierten Tabelle in Quartals-Partitionen inkl. Fortsetzen nach Teilverlust, Relocation mit
 Chunk-Spalte und im Ein-Durchgang-Fallback (IDENTITY erhalten).
@@ -61,9 +61,9 @@ source (and, after a cutover, in the renamed table).
 - GUI, mode "Migrate to archive database now": new checkbox "Include the current month",
   pre-selected; summary shows the effect on purge and cutover. Step 6 panel scrolls if needed.
 
-Live-verified on DEV01: CORO_DB.CARCHIVE -> CORO_DB_ARV including October (6,000 rows), a late row
-and a changed row were picked up by the next run; purge + atomic cutover on a copy of CARCHIVE:
-all 6,001 rows in the archive, open month kept in CARCHIVE_Original, inserts via the view land in
+Live-verified on DEV01: Sales.dbo.Bookings -> SalesArchive including October (6,000 rows), a late row
+and a changed row were picked up by the next run; purge + atomic cutover on a copy of Bookings:
+all 6,001 rows in the archive, open month kept in Bookings_Original, inserts via the view land in
 the archive.
 
 ## [1.13.0.0] — 2026-10-01
@@ -142,7 +142,7 @@ a second "Finish" closes it), No = close without executing, Cancel = stay.
   column was found (PowerShell 5.1: a single object has no `.Count`).
 
 Verified on DEV01 by running the unmodified wizard code with scripted input (message boxes
-answered automatically) against a CARCHIVE-shaped heap: create-only with PK, create + transfer with
+answered automatically) against a Bookings-shaped heap: create-only with PK, create + transfer with
 5 explicitly checked key columns (900/900 rows), and "Finish" -> "No".
 
 ## [1.11.0.0] — 2026-09-28
@@ -151,7 +151,7 @@ answered automatically) against a CARCHIVE-shaped heap: create-only with PK, cre
 
 For a heap, `Invoke-sqmTablePartitionConversion` so far added a new, non-unique clustered index on
 the partition column only. A heap that already has a unique nonclustered key (e.g.
-`CORO_DB.dbo.CARCHIVE` with `IX_Carchive` on `VTDAT, VMTG, VID1, VID2, VSEQ`) ended up with that
+`Sales.dbo.Bookings` with `UX_Bookings` on `BOOKDATE, BOOKCODE, ID1, ID2, SEQ`) ended up with that
 unique index next to the new clustered one. `-PrimaryKeyFromUniqueIndex <name>` instead creates
 `PRIMARY KEY CLUSTERED` with exactly the same key columns and order directly on the partition
 scheme and drops the then redundant index, rewriting the table only once. Uniqueness semantics do
@@ -179,10 +179,10 @@ columns and unique indexes without the partition column need a deliberate decisi
 
 `Invoke-sqmTableArchiveMigration -KeyColumn`, `sqm_ArchiveMonthBatch` and the GUI now accept 5 key
 columns. `sqm_ArchiveMonthLog` gets `LastKeyProcessed5`, added idempotently to existing
-installations on the next run. Reason, verified on DEV01 with CARCHIVE-shaped test data: the
-4-column tuple `VMTG, VID1, VID2, VSEQ` repeats on different days within a month, so the MERGE
+installations on the next run. Reason, verified on DEV01 with Bookings-shaped test data: the
+4-column tuple `BOOKCODE, ID1, ID2, SEQ` repeats on different days within a month, so the MERGE
 failed with "attempted to update the same row more than once" from the second month on (600 of
-900 rows missing). With `VTDAT` as fifth column all 900 rows were archived.
+900 rows missing). With `BOOKDATE` as fifth column all 900 rows were archived.
 
 ### Fix: conversion errors could be reported as success
 
@@ -474,8 +474,8 @@ partitions expire later' doesn't make sense at that point".
 
 ### `Invoke-sqmTableArchiveMigration`: YYYYMMDD integer/string date columns (BoundaryType)
 
-During the live test of [1.6.3.0] against the real `CORO_DB.dbo.CARCHIVE` table (the original
-trigger for the composite key), the migration still failed afterwards: `VTDAT` is stored as
+During the live test of [1.6.3.0] against the real `Sales.dbo.Bookings` table (the original
+trigger for the composite key), the migration still failed afterwards: `BOOKDATE` is stored as
 `INT` in YYYYMMDD format (e.g. `20240115`), not as a real DATE/DATETIME - but the function blindly
 cast the source value range via `[datetime]`, and the SQL procedure directly compared
 DATE-typed period boundaries against the column ("date is incompatible with int"). A separate,
@@ -503,9 +503,9 @@ of reinventing it.
   `@YYYYMM` - for the actual comparison with `@DateColumn` they are additionally converted into
   `SQL_VARIANT` parameters with the integer/string/date value matching `@BoundaryType` (the same,
   already-proven principle as the `@pLastKeyN` key parameters from [1.6.3.0]).
-- Verified live against the REAL `CORO_DB.dbo.CARCHIVE` table (30 months processed, 12 of them
+- Verified live against the REAL `Sales.dbo.Bookings` table (30 months processed, 12 of them
   with actual data - Jan-Dec 2024, 60000/60000 rows, source unchanged afterwards): the checksum
-  over all 34 non-`text` columns as well as the total length of the `text` column (`VDATA`) match
+  over all 34 non-`text` columns as well as the total length of the `text` column (`PAYLOAD`) match
   exactly between source and archive copy. This fully verifies the original bug report (composite
   key + YYYYMMDD integer column together) end-to-end, not just with synthetic test tables.
 
@@ -513,12 +513,12 @@ of reinventing it.
 
 ### Composite keys for `Invoke-sqmTableArchiveMigration` + GUI clarifications
 
-A show-stopper from a live test against the real table `CORO_DB.dbo.CARCHIVE` (7 TB in
+A show-stopper from a live test against the real table `Sales.dbo.Bookings` (multi-terabyte in
 production): `-KeyColumn` so far only supported ONE column, used both as the MERGE match
-condition and for keyset pagination within a month - but `CARCHIVE` has a composite 4-column
-clustered PK (`VMTG, VID1, VID2, VSEQ`), none of these columns is unique on its own. Since
+condition and for keyset pagination within a month - but `Bookings` has a composite 4-column
+clustered PK (`BOOKCODE, ID1, ID2, SEQ`), none of these columns is unique on its own. Since
 everything aborted BEFORE the actual archiving (key-column determination is the very first step),
-nothing had been created in `CORO_DB` either (neither the archive table nor
+nothing had been created in `Sales` either (neither the archive table nor
 `sqm_ArchiveMonthLog`/`sqm_ArchiveMonthBatch`) - which explained three reported symptoms at once
 ("KeyColumn required", "no new table in the archive DB", "where is the merge procedure/helper
 table we already discussed") as ONE shared root cause.
@@ -541,7 +541,7 @@ table we already discussed") as ONE shared root cause.
   `ROW_NUMBER() OVER (ORDER BY <key>)` sequence number per batch row (the row with the highest
   sequence number), NOT via the column-wise maximum (which for composite keys can produce a tuple
   combination that never exists and thereby silently and permanently skip real rows later - data
-  loss on a 7 TB table would have been the consequence).
+  loss on a multi-terabyte table would have been the consequence).
 - **`sqm_ArchiveMonthLog`**: new columns `LastKeyProcessed1`..`LastKeyProcessed4` (resume point as
   a tuple), added additively via an idempotent `ALTER TABLE ... ADD` (the old single column
   `LastKeyProcessed` remains, unused). The upgrade path wasn't optional for this session - DEV01's
@@ -561,9 +561,9 @@ table we already discussed") as ONE shared root cause.
   in the log. Tested both with an explicit `-KeyColumn` and with automatic derivation. Regression
   test with a single-column IDENTITY table (unchanged behavior) passed.
   **A known, separate limitation** (not part of this change, discovered live against the real
-  `CORO_DB.dbo.CARCHIVE` table): `-DateColumn` is internally treated as a real DATE/DATETIME type
+  `Sales.dbo.Bookings` table): `-DateColumn` is internally treated as a real DATE/DATETIME type
   (cast + DATE-typed batch parameters) - a date column stored as `INT` in YYYYMMDD format (like
-  `CARCHIVE.VTDAT`) is therefore NOT supported ("date is incompatible with int"). This limitation
+  `Bookings.BOOKDATE`) is therefore NOT supported ("date is incompatible with int"). This limitation
   already existed before this change and is not part of the composite-key fix - to be addressed
   separately if needed.
 

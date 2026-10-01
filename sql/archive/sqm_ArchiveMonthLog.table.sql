@@ -10,7 +10,7 @@
 -- LastKeyProcessed1..LastKeyProcessed5 ist der Fortsetzungspunkt fuer die
 -- Batch-Schleife innerhalb eines Monats (sqm_ArchiveMonthBatch), als TUPEL
 -- statt Einzelwert - seit Unterstuetzung zusammengesetzter Schluessel (z.B.
--- CORO_DB.dbo.CARCHIVE mit VMTG/VID1/VID2/VSEQ). Ungenutzte Spalten (Migration
+-- Sales.dbo.Bookings mit BOOKCODE/ID1/ID2/SEQ). Ungenutzte Spalten (Migration
 -- mit weniger als 5 Schluesselspalten) bleiben NULL. Weil pro Batch sowohl neue
 -- Zeilen eingefuegt als auch bereits archivierte, seither in der Quelle
 -- geaenderte Zeilen per MERGE aktualisiert werden, laesst sich "bis wohin bin
@@ -87,7 +87,7 @@ BEGIN
     ALTER TABLE dbo.sqm_ArchiveMonthLog ADD LastKeyProcessed4 SQL_VARIANT NULL;
 END
 GO
--- 5. Tupel-Spalte (seit 1.11.0.0): CORO_DB.dbo.CARCHIVE ist erst mit VTDAT als 5. Spalte
+-- 5. Tupel-Spalte (seit 1.11.0.0): Sales.dbo.Bookings ist erst mit BOOKDATE als 5. Spalte
 -- eindeutig - dieselbe 4er-Kombination kann innerhalb eines Monats an mehreren Tagen vorkommen.
 IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.sqm_ArchiveMonthLog') AND name = N'LastKeyProcessed5')
 BEGIN

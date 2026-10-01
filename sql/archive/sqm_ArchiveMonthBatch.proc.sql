@@ -8,7 +8,7 @@
 -- schon einmal archiviert wurde und sich seither in der Quelle geaendert hat.
 --
 -- @KeyColumns: eine oder mehrere (max. 5) durch Komma getrennte Spaltennamen,
--- in key_ordinal-Reihenfolge (z.B. N'VMTG,VID1,VID2,VSEQ'). Zusammen bilden
+-- in key_ordinal-Reihenfolge (z.B. N'BOOKCODE,ID1,ID2,SEQ'). Zusammen bilden
 -- sie den (moeglicherweise zusammengesetzten) eindeutigen Schluessel fuer den
 -- MERGE-Abgleich UND fuer die Keyset-Pagination innerhalb eines Monats.
 --
@@ -39,8 +39,8 @@
 -- Bekannte Einschraenkung: geht von aufsteigend sortierten Schluesselspalten
 -- aus (wie bereits der vorherige Einzelspalten-Code) - absteigende Schluessel-
 -- spalten (sys.index_columns.is_descending_key = 1) werden nicht
--- unterstuetzt. Fuer CORO_DB.dbo.CARCHIVE live geprueft: alle 4 Schluessel-
--- spalten (VMTG, VID1, VID2, VSEQ) sind aufsteigend - kein Blocker.
+-- unterstuetzt. Fuer Sales.dbo.Bookings live geprueft: alle 4 Schluessel-
+-- spalten (BOOKCODE, ID1, ID2, SEQ) sind aufsteigend - kein Blocker.
 --
 -- Bewusst OHNE eine einzelne grosse Transaktion ueber Log-Lesen + MERGE +
 -- Log-Schreiben: bricht die Verbindung zwischen dem MERGE und dem
@@ -63,7 +63,7 @@ CREATE OR ALTER PROCEDURE dbo.sqm_ArchiveMonthBatch
     @ArchiveSchemaName   SYSNAME,
     @ArchiveTableName    SYSNAME,
     @BatchSize           INT = 50000,
-    -- Date (echtes DATE/DATETIME), Int (numerischer Surrogatschluessel, z.B. CARCHIVE.VTDAT) oder
+    -- Date (echtes DATE/DATETIME), Int (numerischer Surrogatschluessel, z.B. Bookings.BOOKDATE) oder
     -- Text (char/varchar-Surrogatschluessel mit demselben Zahlenformat als String) - steuert, in
     -- welcher Form die Periodengrenzen mit @DateColumn verglichen werden (siehe Schritt 1 unten).
     -- Gleiche Konvention wie BoundaryType in
@@ -103,7 +103,7 @@ BEGIN
     -- @PeriodStart/@PeriodEnd dienen weiterhin nur der Kalenderarithmetik (Monatsgrenzen aus
     -- @YYYYMM) - fuer den eigentlichen Vergleich mit @DateColumn werden sie unten je nach
     -- @BoundaryType in die passende Darstellung konvertiert (Schritt 1), da @DateColumn nicht
-    -- zwangslaeufig ein echter DATE/DATETIME-Typ ist (z.B. CARCHIVE.VTDAT ist INT im YYYYMMDD-
+    -- zwangslaeufig ein echter DATE/DATETIME-Typ ist (z.B. Bookings.BOOKDATE ist INT im YYYYMMDD-
     -- Format - ein direkter DATE-Vergleich schlaegt dort mit "date ist inkompatibel mit int" fehl).
     DECLARE @PeriodStart DATE = DATEFROMPARTS(@YYYYMM / 100, @YYYYMM % 100, 1);
     DECLARE @PeriodEnd   DATE = DATEADD(MONTH, 1, @PeriodStart);
