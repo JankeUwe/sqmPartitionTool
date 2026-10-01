@@ -147,6 +147,16 @@
     Nur die partitionierte Archiv-Kopie anlegen, keine Daten uebertragen. Ein spaeterer Aufruf
     ohne diesen Schalter uebertraegt die Daten in die dann vorhandene Tabelle. Nicht zusammen mit
     -PurgeSourceAfterArchive/-CutoverToArchiveView.
+.PARAMETER IncludeOpenPeriods
+    Auch den laufenden Monat und alle spaeteren Monate mit Daten uebertragen ("alles uebernehmen").
+    Ohne -EndPeriod endet die Migration dann beim spaetesten Monat der Quelldaten, mindestens beim
+    laufenden Monat. Offene Monate (laufender und spaetere) werden bei JEDEM Aufruf erneut
+    vollstaendig abgeglichen (MERGE, idempotent) - so kommen auch Zeilen nach, die nach dem ersten
+    Lauf in die weiterhin aktive Quelle geschrieben wurden. Sie werden nie per
+    -PurgeSourceAfterArchive aus der Quelle geloescht (sonst gingen waehrenddessen eintreffende
+    Zeilen verloren). Mit -CutoverToArchiveView laufen ein letzter Abgleich der offenen Monate,
+    das Umbenennen und das Anlegen der View in EINER Transaktion unter exklusiver Tabellensperre -
+    dazwischen kann keine Zeile verloren gehen.
 .PARAMETER RenamedTableSuffix
     Nur relevant mit -CutoverToArchiveView. Suffix fuer die umbenannte Original-Tabelle.
     Standard: '_Original' (gleiche Konvention wie Invoke-sqmTableRelocation).
@@ -271,6 +281,9 @@ function Invoke-sqmTableArchiveMigration
 		[switch]$CreateArchiveTableOnly,
 
 		[Parameter(Mandatory = $false)]
+		[switch]$IncludeOpenPeriods,
+
+		[Parameter(Mandatory = $false)]
 		[System.Management.Automation.PSCredential]$SqlCredential,
 
 		[Parameter(Mandatory = $false)]
@@ -305,19 +318,61 @@ function Invoke-sqmTableArchiveMigration
 		$cutoverAction = "'$Schema.$Table' umbenennen -> '$Schema.$renamedName', dann View '$Schema.$Table' -> '$ArchiveDatabaseName.$ArchiveSchemaName.$Table' anlegen"
 		if (-not $PSCmdlet.ShouldProcess($Database, $cutoverAction)) { return $false }
 
-		$residualRows = [int64](Invoke-DbaQuery @connParams -Database $Database -Query "SELECT COUNT(*) AS Cnt FROM [$Schema].[$Table];" -ErrorAction Stop -EnableException -As PSObject)[0].Cnt
-
-		Invoke-DbaQuery @connParams -Database $Database -Query "EXEC sp_rename N'[$Schema].[$Table]', N'$renamedName';" -ErrorAction Stop -EnableException
-		Invoke-sqmLogging -Message "Original-Tabelle umbenannt: '$Schema.$Table' -> '$Schema.$renamedName' (bleibt vollstaendig erhalten, wird NICHT geloescht)." -FunctionName $functionName -Level "INFO"
-
-		$colRows = Invoke-DbaQuery @connParams -Database $Database -Query "SELECT name AS ColumnName FROM sys.columns WHERE object_id = OBJECT_ID(N'[$Schema].[$renamedName]') ORDER BY column_id;" -ErrorAction Stop -EnableException
+		$colRows = @(Invoke-DbaQuery @connParams -Database $Database -Query "SELECT name AS ColumnName, is_computed, is_identity FROM sys.columns WHERE object_id = OBJECT_ID(N'[$Schema].[$Table]') ORDER BY column_id;" -ErrorAction Stop -EnableException -As PSObject)
 		$colList = ($colRows | ForEach-Object { "[$($_.ColumnName)]" }) -join ', '
 		$viewDdl = "CREATE VIEW [$Schema].[$Table] AS SELECT $colList FROM [$ArchiveDatabaseName].[$ArchiveSchemaName].[$Table];"
-		Invoke-DbaQuery @connParams -Database $Database -Query $viewDdl -ErrorAction Stop -EnableException
+		$archiveFqn = "[$ArchiveDatabaseName].[$ArchiveSchemaName].[$Table]"
+
+		if ($IncludeOpenPeriods)
+		{
+			# Letzter Abgleich der offenen Monate, Umbenennen und View in EINER Transaktion unter
+			# TABLOCKX: zwischen letztem Batch und Umbenennen eingefuegte/geaenderte Zeilen landen so
+			# garantiert im Archiv statt in der umbenannten Tabelle.
+			$openStart = [datetime]::ParseExact("$($currentPeriod)01", 'yyyyMMdd', $null)
+			$openStartLit = switch ($BoundaryType) { 'Int' { [int64]$openStart.ToString($SurrogateDateFormat) }; 'Text' { "'$($openStart.ToString($SurrogateDateFormat))'" }; default { "'$($openStart.ToString('yyyyMMdd'))'" } }
+			$dataCols = @($colRows | Where-Object { -not [bool]$_.is_computed } | ForEach-Object { $_.ColumnName })
+			$hasIdentity = [bool]($colRows | Where-Object { [bool]$_.is_identity -and -not [bool]$_.is_computed })
+			$onClause = ($KeyColumn | ForEach-Object { "t.[$_] = s.[$_]" }) -join ' AND '
+			# IDENTITY-Spalten lassen sich nicht per UPDATE setzen
+			$identityCols = @($colRows | Where-Object { [bool]$_.is_identity } | ForEach-Object { $_.ColumnName })
+			$updCols = @($dataCols | Where-Object { $_ -notin $KeyColumn -and $_ -notin $identityCols })
+			$whenMatched = if ($updCols.Count -gt 0) { "WHEN MATCHED THEN UPDATE SET " + (($updCols | ForEach-Object { "t.[$_] = s.[$_]" }) -join ', ') } else { '' }
+			$insCols = ($dataCols | ForEach-Object { "[$_]" }) -join ', '
+			$insVals = ($dataCols | ForEach-Object { "s.[$_]" }) -join ', '
+			$cutoverSql = @"
+SET XACT_ABORT ON;
+BEGIN TRANSACTION;
+SELECT TOP (0) 1 AS x FROM [$Schema].[$Table] WITH (TABLOCKX, HOLDLOCK);
+$(if ($hasIdentity) { "SET IDENTITY_INSERT $archiveFqn ON;" })
+MERGE $archiveFqn WITH (HOLDLOCK) AS t
+USING (SELECT $insCols FROM [$Schema].[$Table] WHERE [$DateColumn] >= $openStartLit) AS s
+ON $onClause
+$whenMatched
+WHEN NOT MATCHED BY TARGET THEN INSERT ($insCols) VALUES ($insVals);
+DECLARE @merged BIGINT = @@ROWCOUNT;
+$(if ($hasIdentity) { "SET IDENTITY_INSERT $archiveFqn OFF;" })
+EXEC sp_rename N'[$Schema].[$Table]', N'$renamedName';
+EXEC (N'$($viewDdl.Replace("'", "''"))');
+COMMIT TRANSACTION;
+SELECT @merged AS Merged;
+"@
+			$merged = [int64](Invoke-DbaQuery @connParams -Database $Database -Query $cutoverSql -ErrorAction Stop -EnableException -As PSObject)[0].Merged
+			Invoke-sqmLogging -Message "Cutover atomar: letzter Abgleich der offenen Monate ab $currentPeriod ($merged Zeile(n) gemergt), '$Schema.$Table' -> '$Schema.$renamedName' umbenannt und View angelegt - in einer Transaktion." -FunctionName $functionName -Level "INFO"
+			$residualRows = [int64](Invoke-DbaQuery @connParams -Database $Database -Query "SELECT COUNT(*) AS Cnt FROM [$Schema].[$renamedName];" -ErrorAction Stop -EnableException -As PSObject)[0].Cnt
+		}
+		else
+		{
+			$residualRows = [int64](Invoke-DbaQuery @connParams -Database $Database -Query "SELECT COUNT(*) AS Cnt FROM [$Schema].[$Table];" -ErrorAction Stop -EnableException -As PSObject)[0].Cnt
+			Invoke-DbaQuery @connParams -Database $Database -Query "EXEC sp_rename N'[$Schema].[$Table]', N'$renamedName';" -ErrorAction Stop -EnableException
+			Invoke-DbaQuery @connParams -Database $Database -Query $viewDdl -ErrorAction Stop -EnableException
+		}
+		Invoke-sqmLogging -Message "Original-Tabelle umbenannt: '$Schema.$Table' -> '$Schema.$renamedName' (bleibt vollstaendig erhalten, wird NICHT geloescht)." -FunctionName $functionName -Level "INFO"
 
 		$residualMsg = if ($residualRows -gt 0)
 		{
-			"ACHTUNG: $residualRows Zeile(n) in '$Schema.$renamedName' wurden NICHT archiviert (z.B. der laufende, noch offene Monat) - vor dem Loeschen pruefen/manuell nachziehen."
+			if ($IncludeOpenPeriods -and -not $PurgeSourceAfterArchive) { "$residualRows Zeile(n) verbleiben in '$Schema.$renamedName' - alle Monate inkl. der offenen wurden archiviert, die Tabelle ist nur noch Sicherungskopie." }
+			elseif ($IncludeOpenPeriods) { "$residualRows Zeile(n) verbleiben in '$Schema.$renamedName' (offene Monate, im Archiv enthalten, aber bewusst nicht aus der Quelle geloescht) - vor dem Loeschen pruefen." }
+			else { "ACHTUNG: $residualRows Zeile(n) in '$Schema.$renamedName' - der laufende, noch offene Monat wurde NICHT archiviert (ohne -PurgeSourceAfterArchive auch alle uebrigen Zeilen als Kopie) - vor dem Loeschen pruefen/manuell nachziehen." }
 		}
 		else { "'$Schema.$renamedName' ist leer." }
 		Invoke-sqmLogging -Message "Cutover abgeschlossen: '$Schema.$Table' ist jetzt eine View auf '$ArchiveDatabaseName.$ArchiveSchemaName.$Table'. $residualMsg Admin kann '$Schema.$renamedName' nach Pruefung manuell loeschen." -FunctionName $functionName -Level "INFO"
@@ -486,6 +541,11 @@ WHERE i.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND c.name = N'$DateColumn'
 			Invoke-sqmLogging -Message "'$ArchiveDatabaseName.$ArchiveSchemaName.$Table' existiert nicht, dbo.sqm_ArchiveMonthLog fuehrt aber $($staleLogPeriods.Count) Monat(e) als abgeschlossen ($(($staleLogPeriods | Measure-Object -Minimum).Minimum) - $(($staleLogPeriods | Measure-Object -Maximum).Maximum)) - veraltete Eintraege eines frueheren Laufs, werden zurueckgesetzt und die Monate erneut uebertragen." -FunctionName $functionName -Level "WARNING"
 		}
 
+		# Offene Monate (laufender und spaetere) gelten mit -IncludeOpenPeriods nie als abgeschlossen:
+		# in die aktive Quelle koennen weiter Zeilen kommen, also jedes Mal neu abgleichen.
+		$currentPeriod = [int](Get-Date).ToString('yyyyMM')
+		if ($IncludeOpenPeriods) { $completedPeriods = @($completedPeriods | Where-Object { $_ -lt $currentPeriod }) }
+
 		$rangeParams = @{ SqlInstance = $SqlInstance; Database = $Database; Schema = $Schema; Table = $Table; Column = $DateColumn }
 		if ($SqlCredential) { $rangeParams['SqlCredential'] = $SqlCredential }
 		$srcRange = Get-sqmPartitionColumnRange @rangeParams
@@ -509,7 +569,16 @@ WHERE i.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND c.name = N'$DateColumn'
 			# einen rohen Ganzzahlwert wie 20240101 fehl ("nicht als DateTime erkannt").
 			$minValDt = if ($BoundaryType -in @('Int', 'Text')) { [datetime]::ParseExact([string]$srcRange.MinValue, $SurrogateDateFormat, $null) } else { [datetime]$srcRange.MinValue }
 			if (-not $StartPeriod) { $StartPeriod = [int]$minValDt.ToString('yyyyMM') }
-			if (-not $EndPeriod) { $EndPeriod = [int](Get-Date).AddMonths(-1).ToString('yyyyMM') }
+			if (-not $EndPeriod)
+			{
+				if ($IncludeOpenPeriods)
+				{
+					$maxValDt = if ($BoundaryType -in @('Int', 'Text')) { [datetime]::ParseExact([string]$srcRange.MaxValue, $SurrogateDateFormat, $null) } else { [datetime]$srcRange.MaxValue }
+					$EndPeriod = [Math]::Max([int]$maxValDt.ToString('yyyyMM'), $currentPeriod)
+					Invoke-sqmLogging -Message "-IncludeOpenPeriods: Migration bis einschliesslich $EndPeriod (offene Monate ab $currentPeriod werden bei jedem Aufruf neu abgeglichen)." -FunctionName $functionName -Level "INFO"
+				}
+				else { $EndPeriod = [int](Get-Date).AddMonths(-1).ToString('yyyyMM') }
+			}
 		}
 		if ($EndPeriod -lt $StartPeriod) { throw "-EndPeriod ($EndPeriod) liegt vor -StartPeriod ($StartPeriod)." }
 
@@ -698,6 +767,14 @@ WHERE i.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND c.name = N'$DateColumn'
 			Write-Progress -Activity $progressActivity -Status "Period $period ($periodIndex of $totalPeriodsToProcess) - $totalRows row(s) archived so far" -PercentComplete $percentComplete
 			Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Archiving period $period ($periodIndex of $totalPeriodsToProcess) ..."
 
+			$isOpenPeriod = $IncludeOpenPeriods -and $period -ge $currentPeriod
+			if ($isOpenPeriod)
+			{
+				# Fortsetzpunkt des letzten Abgleichs verwerfen - der Monat wird von vorn gemergt, damit
+				# auch nachtraeglich eingefuegte Zeilen mit kleinerem Schluessel erfasst werden.
+				Invoke-DbaQuery @connParams -Database $Database -Query "DELETE FROM dbo.sqm_ArchiveMonthLog WHERE SchemaName = N'$Schema' AND TableName = N'$Table' AND ArchiveDatabaseName = N'$ArchiveDatabaseName' AND YYYYMM = $period;" -ErrorAction Stop -EnableException | Out-Null
+			}
+
 			$monthComplete = $false
 			$rowsThisPeriod = 0
 			while (-not $monthComplete)
@@ -728,7 +805,11 @@ SELECT @RowsThisCall AS RowsThisCall, @MonthComplete AS MonthComplete;
 			#     dann periodisch shrinken. NUR nach Row-Count-Gegenpruefung gegen das Log - trennt
 			#     dieses Sicherheitsnetz bewusst von $monthComplete allein.
 			# ---------------------------------------------------------------------------------------
-			if ($PurgeSourceAfterArchive)
+			if ($PurgeSourceAfterArchive -and $isOpenPeriod)
+			{
+				Invoke-sqmLogging -Message "Monat $period ist noch offen - wird NICHT aus der Quelle geloescht (zwischen Zaehlung und DELETE eintreffende Zeilen gingen sonst verloren)." -FunctionName $functionName -Level "WARNING"
+			}
+			elseif ($PurgeSourceAfterArchive)
 			{
 				$periodStartDate = [datetime]::ParseExact("$($period)01", 'yyyyMMdd', $null)
 				$periodEndDate = $periodStartDate.AddMonths(1)

@@ -1,5 +1,30 @@
 ﻿# sqmPartitionTool — Changelog
 
+## [1.14.0.0] — 2026-10-01
+
+### `Invoke-sqmTableArchiveMigration -IncludeOpenPeriods`: transfer ALL data, including the current month
+
+Until now the migration always stopped at the previous month; the current month stayed in the
+source (and, after a cutover, in the renamed table).
+
+- New `-IncludeOpenPeriods`: without `-EndPeriod` the migration runs up to the latest month in the
+  source data, at least the current month.
+- Open months (current and later) are re-synced completely on EVERY run (idempotent MERGE from the
+  start of the month), so rows written into the still active source after the first run follow,
+  including late rows with a smaller key and changed rows. Before, a month marked "Completed" was
+  never touched again.
+- Open months are never deleted by `-PurgeSourceAfterArchive` (rows arriving between the row-count
+  check and the DELETE would be lost).
+- With `-CutoverToArchiveView`: final MERGE of the open months, rename and CREATE VIEW run in ONE
+  transaction under TABLOCKX; no row can slip in between the last batch and the rename.
+- GUI, mode "Migrate to archive database now": new checkbox "Include the current month",
+  pre-selected; summary shows the effect on purge and cutover. Step 6 panel scrolls if needed.
+
+Live-verified on DEV01: CORO_DB.CARCHIVE -> CORO_DB_ARV including October (6,000 rows), a late row
+and a changed row were picked up by the next run; purge + atomic cutover on a copy of CARCHIVE:
+all 6,001 rows in the archive, open month kept in CARCHIVE_Original, inserts via the view land in
+the archive.
+
 ## [1.13.0.0] — 2026-10-01
 
 ### `Copy-sqmPartitionedTable` + GUI copy mode: composite keys with up to 5 columns

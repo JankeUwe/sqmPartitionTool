@@ -696,6 +696,8 @@
     $p6 = New-Object System.Windows.Forms.Panel
     $p6.Dock = 'Fill'
     $p6.BackColor = $cPanel
+    # Mit PK-Option + Schluesselliste + drei Optionen kann der Inhalt hoeher als das Fenster werden
+    $p6.AutoScroll = $true
 
     # "Migrate now" ist ein eigener, zur In-Place-Partitionierung EXKLUSIVER Ausfuehrungsmodus (ruft
     # Invoke-sqmTableArchiveMigration statt Invoke-sqmTablePartitionConversion auf) - im Unterschied
@@ -758,6 +760,13 @@
     $chk6Cutover.AutoSize = $true
     $chk6Cutover.ForeColor = $cText
     $chk6Cutover.Checked = $true
+    # Vorausgewaehlt: "Migrate now" soll die Tabelle komplett uebernehmen. Ohne Haken bleibt wie
+    # bisher der laufende Monat in der Quelle.
+    $chk6IncludeOpen = New-Object System.Windows.Forms.CheckBox
+    $chk6IncludeOpen.Text = 'Include the current month (transfer ALL data; open months are re-synced on every run, never deleted from the source)'
+    $chk6IncludeOpen.AutoSize = $true
+    $chk6IncludeOpen.ForeColor = $cText
+    $chk6IncludeOpen.Checked = $true
 
     $chk6Retention = New-Object System.Windows.Forms.CheckBox
     $chk6Retention.Text = 'Set up automatic maintenance (sliding-window extension + retention)'
@@ -879,7 +888,7 @@
     $p6.Controls.Add($chk6Pk)
 
     $p6.Controls.Add($chk6MigrateNow)
-    $p6.Controls.Add($pn6Mode); $p6.Controls.Add($chk6Purge); $p6.Controls.Add($chk6Cutover)
+    $p6.Controls.Add($pn6Mode); $p6.Controls.Add($chk6Purge); $p6.Controls.Add($chk6Cutover); $p6.Controls.Add($chk6IncludeOpen)
     $p6.Controls.Add($lbl6Key); $p6.Controls.Add($clb6Key)
     $p6.Controls.Add($chk6Retention)
     $p6.Controls.Add($lbl6a); $p6.Controls.Add($num6Retention); $p6.Controls.Add($cmb6Unit)
@@ -1043,6 +1052,7 @@ ORDER BY KeyCount, i.index_id
         $pn6Mode.Visible = $migrateNow
         $chk6Purge.Visible = $migrateNow -and $rb6Transfer.Checked
         $chk6Cutover.Visible = $migrateNow -and $rb6Transfer.Checked
+        $chk6IncludeOpen.Visible = $migrateNow -and $rb6Transfer.Checked
 
         if ($copyMode)
         {
@@ -1083,8 +1093,9 @@ ORDER BY KeyCount, i.index_id
                 $clb6Key.Location = New-Object System.Drawing.Point(24, ($y + 24))
                 $y += 24 + $clb6Key.Height + 10
             }
-            $chk6Purge.Location = New-Object System.Drawing.Point(24, $y)
-            $chk6Cutover.Location = New-Object System.Drawing.Point(24, ($y + 26))
+            $chk6IncludeOpen.Location = New-Object System.Drawing.Point(24, $y)
+            $chk6Purge.Location = New-Object System.Drawing.Point(24, ($y + 26))
+            $chk6Cutover.Location = New-Object System.Drawing.Point(24, ($y + 52))
         }
         else
         {
@@ -1198,8 +1209,9 @@ ORDER BY KeyCount, i.index_id
             }
             if ($rb6Transfer.Checked)
             {
-                $lines.Add("Delete from source   : $(if ($chk6Purge.Checked) { 'Yes, each month after its row-count check' } else { 'No, source stays unchanged' })")
-                $lines.Add("Cutover to view      : $(if ($chk6Cutover.Checked) { 'Yes - source renamed and replaced by a view (current month stays in the renamed table)' } else { 'No' })")
+                $lines.Add("Months               : $(if ($chk6IncludeOpen.Checked) { 'ALL, including the current month (re-synced on every run)' } else { 'up to the previous month - the current month stays in the source' })")
+                $lines.Add("Delete from source   : $(if ($chk6Purge.Checked) { "Yes, each month after its row-count check$(if ($chk6IncludeOpen.Checked) { ' (not the current month)' })" } else { 'No, source stays unchanged' })")
+                $lines.Add("Cutover to view      : $(if (-not $chk6Cutover.Checked) { 'No' } elseif ($chk6IncludeOpen.Checked) { 'Yes - final sync, rename and view in ONE transaction (no row can slip through)' } else { 'Yes - source renamed and replaced by a view (current month stays in the renamed table)' })")
             }
             else
             {
@@ -1352,6 +1364,7 @@ ORDER BY KeyCount, i.index_id
                 {
                     if ($chk6Purge.Checked) { $archParams['PurgeSourceAfterArchive'] = $true }
                     if ($chk6Cutover.Checked) { $archParams['CutoverToArchiveView'] = $true }
+                    if ($chk6IncludeOpen.Checked) { $archParams['IncludeOpenPeriods'] = $true }
                 }
                 if (Test-Step6PkActive) { $archParams['PrimaryKeyFromUniqueIndex'] = $script:step6PkCandidate.IndexName }
                 $keyCount = $clb6Key.CheckedItems.Count
