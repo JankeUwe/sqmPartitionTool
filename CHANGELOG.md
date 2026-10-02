@@ -1,5 +1,41 @@
 ﻿# sqmPartitionTool — Changelog
 
+## [1.16.0.0] — 2026-10-02
+
+### New filegroup on a drive of choice (`-FilePath`)
+
+New filegroups always landed in the instance's default data path. `Invoke-sqmTablePartitionConversion`,
+`Invoke-sqmTableArchiveMigration` and `Copy-sqmPartitionedTable` now take `-FilePath`, a folder
+**on the SQL Server** (e.g. `G:\SQLData\Partitions`), passed through to
+`New-sqmPartitionFilegroupPlan`. A missing folder is created with `xp_create_subdir`; a drive that
+does not exist on the server fails before anything is created, with a clear message. Applies to
+newly created filegroups only: an existing filegroup is reused and not moved (warning if its files
+live elsewhere). GUI step 4 has a *Data file folder (server)* field listing the server's drives with
+their free space (`xp_fixeddrives`); empty = instance default.
+
+Fixed on the way: `New-sqmPartitionFilegroupPlan` built the file name with `Join-Path`, which
+resolves the drive letter on the **local** machine. For a server data path on a drive the client
+does not have, that produced an empty file name. Server paths are now concatenated as strings.
+
+### `Copy-sqmPartitionedTable -CreateTableOnly`
+
+Creates only the newly partitioned target table (filegroups, partition function/scheme, table with
+indexes), copies no data and does not register it. A later call without the switch copies the data
+into the existing table and registers it. If the target already exists, nothing happens (status
+`TargetTableExists`). GUI step 6 (copy mode) offers *create the target table only* or *create and
+copy*, like the archive migration already did with `-CreateArchiveTableOnly`.
+
+### Fix: archive migration of a heap without `-KeyColumn` failed
+
+Since 1.15.0.0 the archive migration needs no key, but the derived (empty) key list of a heap was
+still assigned to `-KeyColumn`, whose `[ValidateCount(1, 5)]` aborted the call with a
+`ValidateSetFailure`. Same for tables with more than five clustered key columns. The key is now only
+taken over when it has 1 to 5 columns.
+
+Verified on DEV01 (PS 5.1): conversion, copy (create only, then copy 20,000 rows into it, then
+create-only again) and archive migration of a heap, with filegroup folders on C: and D: created on
+the fly; an invalid drive fails without leaving a table behind.
+
 ## [1.15.1.0] — 2026-10-01
 
 ### Archive migration and re-partitioned copy read each chunk by index seek

@@ -85,6 +85,10 @@
 .PARAMETER FilegroupStrategy
     Single (Standard) oder PerPeriod - durchgereicht an Invoke-sqmTablePartitionConversion fuer die
     Archiv-Kopie.
+.PARAMETER FilePath
+    Verzeichnis AUF DEM SQL SERVER fuer die neue(n) Filegroup-Datei(en) der Archiv-Kopie (z.B.
+    'G:\SQLData\Archive'), durchgereicht an Invoke-sqmTablePartitionConversion. Ohne Angabe:
+    Standard-Datenpfad der Instanz.
 .PARAMETER FutureBufferPeriods
     Durchgereicht an Invoke-sqmTablePartitionConversion. Standard: 3.
 .PARAMETER BoundaryType
@@ -234,6 +238,9 @@ function Invoke-sqmTableArchiveMigration
 
 		[Parameter(Mandatory = $false)]
 		[int]$FutureBufferPeriods = 3,
+
+		[Parameter(Mandatory = $false)]
+		[string]$FilePath,
 
 		[Parameter(Mandatory = $false)]
 		[ValidateSet('Date', 'Int', 'Text')]
@@ -433,7 +440,7 @@ ORDER BY ic.key_ordinal
 			$pkIndexCols = @(Invoke-DbaQuery @connParams -Database $Database -Query $pkIdxQuery -ErrorAction Stop -EnableException -As PSObject)
 			if ($pkIndexCols.Count -eq 0) { throw "-PrimaryKeyFromUniqueIndex: Index '$PrimaryKeyFromUniqueIndex' auf '$Schema.$Table' nicht gefunden." }
 			if (-not [bool]$pkIndexCols[0].is_unique -or $pkIndexCols[0].type_desc -ne 'NONCLUSTERED') { throw "-PrimaryKeyFromUniqueIndex: '$PrimaryKeyFromUniqueIndex' ist kein eindeutiger Nonclustered Index." }
-			if (-not $KeyColumn)
+			if (-not $KeyColumn -and $pkIndexCols.Count -le 5)
 			{
 				$KeyColumn = @($pkIndexCols | ForEach-Object { $_.ColumnName })
 				Invoke-sqmLogging -Message "-KeyColumn aus '$PrimaryKeyFromUniqueIndex' uebernommen: $($KeyColumn -join ', ')." -FunctionName $functionName -Level "INFO"
@@ -463,7 +470,10 @@ ORDER BY ic.key_ordinal
 			$keyNeeded = $IncludeOpenPeriods -and $CutoverToArchiveView
 			if ($ciKeyRows.Count -eq 0 -and $keyNeeded) { throw "'-KeyColumn' ist Pflicht: '$Schema.$Table' ist ein Heap - der abschliessende Abgleich beim Cutover mit -IncludeOpenPeriods braucht einen eindeutigen Schluessel (alternativ -PrimaryKeyFromUniqueIndex)." }
 			if ($ciKeyRows.Count -gt 5 -and $keyNeeded) { throw "'$Schema.$Table' hat einen zusammengesetzten Schluessel mit $($ciKeyRows.Count) Spalten - aktuell werden maximal 5 Schluesselspalten unterstuetzt. '-KeyColumn' muss eine eigene, hoechstens 5-spaltige eindeutige Schluesselliste explizit angeben." }
-			$KeyColumn = @($ciKeyRows | ForEach-Object { $_.ColumnName })
+			# Nur 1-5 Spalten zuweisen: [ValidateCount(1, 5)] am Parameter gilt auch fuer spaetere
+			# Zuweisungen - ein Heap (0 Spalten) wuerde sonst mit ValidateSetFailure abbrechen, obwohl
+			# ohne -IncludeOpenPeriods -CutoverToArchiveView gar kein Schluessel gebraucht wird.
+			if ($ciKeyRows.Count -ge 1 -and $ciKeyRows.Count -le 5) { $KeyColumn = @($ciKeyRows | ForEach-Object { $_.ColumnName }) }
 		}
 		elseif (@($KeyColumn).Count -gt 5)
 		{
@@ -680,6 +690,7 @@ WHERE i.object_id = OBJECT_ID(N'[$Schema].[$Table]') AND c.name = N'$DateColumn'
 			if ($BoundaryType) { $convParams['BoundaryType'] = $BoundaryType; $convParams['SurrogateDateFormat'] = $SurrogateDateFormat }
 			if ($AllowKeyChange) { $convParams['AllowKeyChange'] = $true }
 			if ($Online) { $convParams['Online'] = $true }
+			if ($FilePath) { $convParams['FilePath'] = $FilePath }
 			if ($SqlCredential) { $convParams['SqlCredential'] = $SqlCredential }
 
 			try

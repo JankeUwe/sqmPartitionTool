@@ -124,6 +124,7 @@
         FilegroupStrategy   = 'Single'
         FutureBufferPeriods = 3
         DataCompression     = 'None'
+        FilePath            = ''
         AllowKeyChange      = $false
         Boundaries          = $null
         ArchiveEnabled      = $false
@@ -614,6 +615,44 @@
     $cmb4Fmt.SelectedIndex = 0
     $cmb4Fmt.Visible = $false
 
+    # Verzeichnis auf dem SERVER fuer die neue(n) Filegroup-Datei(en) - Laufwerk der Wahl. Leer =
+    # Standard-Datenpfad der Instanz. Die Liste zeigt die Laufwerke des Servers (xp_fixeddrives),
+    # ein Unterordner kann frei eingetippt werden und wird bei Bedarf angelegt.
+    $lbl4Path = New-Object System.Windows.Forms.Label
+    $lbl4Path.Text = 'Data file folder (server):'
+    $lbl4Path.Location = New-Object System.Drawing.Point(4, 266)
+    $lbl4Path.AutoSize = $true
+    $lbl4Path.ForeColor = $cDim
+    $cmb4Path = New-Object System.Windows.Forms.ComboBox
+    $cmb4Path.Location = New-Object System.Drawing.Point(180, 262)
+    $cmb4Path.Size = New-Object System.Drawing.Size(420, 24)
+    $cmb4Path.BackColor = $cWindow
+    $cmb4Path.ForeColor = $cText
+    $cmb4Path.DropDownStyle = 'DropDown'
+    $toolTip4Path = New-Object System.Windows.Forms.ToolTip
+    $toolTip4Path.SetToolTip($cmb4Path, 'Folder ON THE SQL SERVER for the new filegroup file(s), e.g. G:\SQLData\Partitions. Pick a drive and type a subfolder if you like - it is created if missing. Leave empty for the instance default data path. An existing filegroup is reused and NOT moved.')
+    $lbl4PathInfo = New-Object System.Windows.Forms.Label
+    $lbl4PathInfo.Location = New-Object System.Drawing.Point(180, 292)
+    $lbl4PathInfo.Size = New-Object System.Drawing.Size(720, 40)
+    $lbl4PathInfo.ForeColor = $cDim
+    $lbl4PathInfo.Text = ''
+    $script:step4PathLoaded = $false
+    function Load-Step4Paths
+    {
+        if ($script:step4PathLoaded) { return }
+        $script:step4PathLoaded = $true
+        $cp = $script:connParams
+        $defaultData = $null
+        try { $defaultData = (Get-DbaDefaultPath -SqlInstance $script:wiz.SqlInstance @cp -ErrorAction Stop).Data } catch { }
+        $drives = @()
+        try { $drives = @(Invoke-DbaQuery -SqlInstance $script:wiz.SqlInstance @cp -Database master -Query 'EXEC master.dbo.xp_fixeddrives;' -As PSObject -EnableException -ErrorAction Stop) } catch { }
+        $cmb4Path.Items.Clear()
+        foreach ($d in $drives) { [void]$cmb4Path.Items.Add("$($d.drive):\") }
+        $free = ($drives | ForEach-Object { "$($_.drive): $([math]::Round([double]$_.'MB free' / 1024, 1)) GB" }) -join ', '
+        $lbl4PathInfo.Text = "Empty = instance default$(if ($defaultData) { " ($defaultData)" }).$(if ($free) { "  Free space on the server: $free" })"
+    }
+
+    $p4.Controls.Add($lbl4Path); $p4.Controls.Add($cmb4Path); $p4.Controls.Add($lbl4PathInfo)
     $p4.Controls.Add($lbl4a); $p4.Controls.Add($cmb4Gran)
     $p4.Controls.Add($lbl4b); $p4.Controls.Add($cmb4Fg)
     $p4.Controls.Add($lbl4c); $p4.Controls.Add($num4Buffer)
@@ -671,6 +710,7 @@
             $script:wiz.FilegroupStrategy = if ($cmb4Fg.SelectedIndex -eq 1) { 'PerPeriod' } else { 'Single' }
             $script:wiz.FutureBufferPeriods = [int]$num4Buffer.Value
             $script:wiz.DataCompression = if ($cmb4Comp.SelectedItem) { [string]$cmb4Comp.SelectedItem } else { 'None' }
+            $script:wiz.FilePath = $cmb4Path.Text.Trim()
             $dateTypesGui = @('date', 'datetime', 'datetime2', 'smalldatetime', 'datetimeoffset')
             $textTypesGui = @('char', 'varchar', 'nchar', 'nvarchar')
             $script:wiz.BoundaryType = if ($script:wiz.DataType -in $dateTypesGui) { 'Date' } elseif ($script:wiz.DataType -in $textTypesGui) { 'Text' } else { 'Int' }
@@ -857,6 +897,24 @@
     $toolTip6TargetTable = New-Object System.Windows.Forms.ToolTip
     $toolTip6TargetTable.SetToolTip($txt6TargetTable, 'Leave empty to keep the same table name in the target database.')
 
+    # Kopiermodus: nur die neu partitionierte Zieltabelle anlegen, oder anlegen UND Daten kopieren.
+    # Eigenes Panel = eigene RadioButton-Gruppe (unabhaengig von $pn6Mode der Archivmigration).
+    $pn6CopyMode = New-Object System.Windows.Forms.Panel
+    $pn6CopyMode.Location = New-Object System.Drawing.Point(4, 124)
+    $pn6CopyMode.Size = New-Object System.Drawing.Size(700, 50)
+    $rb6CopyCreateOnly = New-Object System.Windows.Forms.RadioButton
+    $rb6CopyCreateOnly.Text = 'Create the partitioned target table only (no data copy)'
+    $rb6CopyCreateOnly.Location = New-Object System.Drawing.Point(0, 0)
+    $rb6CopyCreateOnly.AutoSize = $true
+    $rb6CopyCreateOnly.ForeColor = $cText
+    $rb6CopyTransfer = New-Object System.Windows.Forms.RadioButton
+    $rb6CopyTransfer.Text = 'Create the target table AND copy the data'
+    $rb6CopyTransfer.Location = New-Object System.Drawing.Point(0, 24)
+    $rb6CopyTransfer.AutoSize = $true
+    $rb6CopyTransfer.ForeColor = $cText
+    $rb6CopyTransfer.Checked = $true
+    $pn6CopyMode.Controls.Add($rb6CopyCreateOnly); $pn6CopyMode.Controls.Add($rb6CopyTransfer)
+
     # Nur bei In-place-Umwandlung eines Heaps, der einen geeigneten eindeutigen Nonclustered Index
     # hat (Test-Step6PkCandidate): daraus wird der Clustered PK auf dem Partition Scheme statt eines
     # neuen, nicht eindeutigen Index auf der Partitionsspalte. Bewusst NICHT vorausgewaehlt - es ist
@@ -879,6 +937,7 @@
     $p6.Controls.Add($lbl6CopyInfo)
     $p6.Controls.Add($lbl6TargetDb); $p6.Controls.Add($txt6TargetDb)
     $p6.Controls.Add($lbl6TargetTable); $p6.Controls.Add($txt6TargetTable)
+    $p6.Controls.Add($pn6CopyMode)
 
     # Prueft (einmalig pro Tabellenwahl), ob die aktuell gewaehlte Tabelle einen Schluessel hat, aus
     # dem Invoke-sqmTableArchiveMigration automatisch ableiten kann (1-4-spaltiger Clustered
@@ -989,6 +1048,7 @@ ORDER BY KeyCount, i.index_id
         $lbl6CopyInfo.Visible = $copyMode
         $lbl6TargetDb.Visible = $copyMode; $txt6TargetDb.Visible = $copyMode
         $lbl6TargetTable.Visible = $copyMode; $txt6TargetTable.Visible = $copyMode
+        $pn6CopyMode.Visible = $copyMode
 
         if (-not $copyMode) { Test-Step6PkCandidate }
         $chk6Pk.Visible = (-not $copyMode) -and [bool]$script:step6PkCandidate
@@ -1122,11 +1182,19 @@ ORDER BY KeyCount, i.index_id
             $(if ($script:wiz.BoundaryType -ne 'Date') { " | SurrogateDateFormat: $($script:wiz.SurrogateDateFormat)" } else { '' }))
         $lines.Add("Filegroup Strategy   : $($script:wiz.FilegroupStrategy) | Future Buffer: $($script:wiz.FutureBufferPeriods) period(s)")
         $lines.Add("Data Compression     : $($script:wiz.DataCompression)")
+        $lines.Add("Data file folder     : $(if ($script:wiz.FilePath) { "$($script:wiz.FilePath) (on the server, created if missing; only for NEW filegroups)" } else { 'instance default data path' })")
         if ($script:wiz.SourceIsPartitioned)
         {
             $targetTableForSummary = if ($txt6TargetTable.Text.Trim()) { $txt6TargetTable.Text.Trim() } else { $script:wiz.TableName }
             $lines.Add("Mode                 : COPY (new partitioning) -> '$($txt6TargetDb.Text.Trim()).$($script:wiz.SchemaName).$targetTableForSummary'")
-            $lines.Add('Copy method          : per target partition with sqmDataTransfer (SqlBulkCopy), resumable, no key needed')
+            if ($rb6CopyCreateOnly.Checked)
+            {
+                $lines.Add('Data                 : NOT copied - only the empty partitioned table is created (run again with "create and copy" later)')
+            }
+            else
+            {
+                $lines.Add('Copy method          : per target partition with sqmDataTransfer (SqlBulkCopy), resumable, no key needed')
+            }
             $lines.Add("Partitions           : $($script:wiz.Boundaries.Count + 1) ($($script:wiz.Boundaries.Count) boundary value(s))")
             $lines.Add('                       Source table stays fully active and unchanged (no rename, no cutover).')
             $txt7Summary.Text = $lines -join "`r`n"
@@ -1194,7 +1262,16 @@ ORDER BY KeyCount, i.index_id
                 return
             }
             $targetTableName = if ($txt6TargetTable.Text.Trim()) { $txt6TargetTable.Text.Trim() } else { $script:wiz.TableName }
-            $confirm = [System.Windows.Forms.MessageBox]::Show("Copy '$($script:wiz.SchemaName).$($script:wiz.TableName)' as a NEW, independently partitioned table into '$($txt6TargetDb.Text.Trim())'?`n`nThe source table is NOT modified - it stays active under its current partitioning.", 'Confirm', 'YesNo', 'Warning')
+            $copyCreateOnly = $rb6CopyCreateOnly.Checked
+            $confirmCopyText = if ($copyCreateOnly)
+            {
+                "Create the partitioned table '$($txt6TargetDb.Text.Trim()).$($script:wiz.SchemaName).$targetTableName' (structure of '$($script:wiz.SchemaName).$($script:wiz.TableName)') now?`n`nNo data is copied, the source table is not changed."
+            }
+            else
+            {
+                "Copy '$($script:wiz.SchemaName).$($script:wiz.TableName)' as a NEW, independently partitioned table into '$($txt6TargetDb.Text.Trim())'?`n`nThe source table is NOT modified - it stays active under its current partitioning."
+            }
+            $confirm = [System.Windows.Forms.MessageBox]::Show($confirmCopyText, 'Confirm', 'YesNo', 'Warning')
             if ($confirm -ne 'Yes') { return }
 
             $btn7Execute.Enabled = $false
@@ -1221,7 +1298,17 @@ ORDER BY KeyCount, i.index_id
                     ErrorAction         = 'Stop'
                     EnableException     = $true
                 }
+                if ($script:wiz.FilePath) { $copyParams['FilePath'] = $script:wiz.FilePath }
+                if ($copyCreateOnly) { $copyParams['CreateTableOnly'] = $true }
                 $result = Copy-sqmPartitionedTable @cp @copyParams
+                if ($copyCreateOnly)
+                {
+                    Add-Log "Target table: status $($result.Status)$(if ($result.Status -eq 'TargetTableExists') { ' (already existed, nothing created)' } elseif ($result.FilePath) { " - filegroup file(s) in '$($result.FilePath)'" })."
+                    Add-Log 'DONE.'
+                    $script:executionDone = $true
+                    [System.Windows.Forms.MessageBox]::Show("Target table '$($txt6TargetDb.Text.Trim()).$($script:wiz.SchemaName).$targetTableName': $($result.Status).`n`nNo data was copied.", 'Success', 'OK', 'Information') | Out-Null
+                    return
+                }
                 Add-Log "Copy completed: $($result.RowsCopied) row(s) copied, $($result.RowsVerified) row(s) verified in target, status $($result.Status)."
                 Add-Log 'DONE.'
                 $script:executionDone = $true
@@ -1290,6 +1377,7 @@ ORDER BY KeyCount, i.index_id
                     EnableException         = $true
                 }
                 if ($script:wiz.BoundaryType) { $archParams['BoundaryType'] = $script:wiz.BoundaryType; $archParams['SurrogateDateFormat'] = $script:wiz.SurrogateDateFormat }
+                if ($script:wiz.FilePath) { $archParams['FilePath'] = $script:wiz.FilePath }
                 if ($rb6CreateOnly.Checked) { $archParams['CreateArchiveTableOnly'] = $true }
                 else
                 {
@@ -1371,6 +1459,7 @@ ORDER BY KeyCount, i.index_id
                 if ($txt3End.Text.Trim()) { $convParams['ManualEndValue'] = $txt3End.Text.Trim() }
             }
             if (Test-Step6PkActive) { $convParams['PrimaryKeyFromUniqueIndex'] = $script:step6PkCandidate.IndexName }
+            if ($script:wiz.FilePath) { $convParams['FilePath'] = $script:wiz.FilePath }
             $result = Invoke-sqmTablePartitionConversion @cp @convParams
             Add-Log "Conversion completed: $($result.PartitionCount) partition(s), status $($result.Status)."
             if ($result.PrimaryKeyCreated) { Add-Log "Primary key '$($result.PrimaryKeyCreated)' created (clustered, on the partition scheme)." }
@@ -1496,6 +1585,7 @@ ORDER BY KeyCount, i.index_id
                 if ($script:wiz.SuggestedGranularity) { $cmb4Gran.SelectedItem = $script:wiz.SuggestedGranularity }
                 elseif (-not $cmb4Gran.SelectedItem) { $cmb4Gran.SelectedIndex = 0 }
                 Update-Step4Warning
+                Load-Step4Paths
                 $isDateCol = $script:wiz.DataType -in @('date', 'datetime', 'datetime2', 'smalldatetime', 'datetimeoffset')
                 $lbl4d.Visible = -not $isDateCol
                 $cmb4Fmt.Visible = -not $isDateCol

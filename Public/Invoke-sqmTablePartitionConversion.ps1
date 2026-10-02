@@ -93,6 +93,10 @@
     gefuehrt wird).
 .PARAMETER FilegroupStrategy
     Single (Standard) oder PerPeriod.
+.PARAMETER FilePath
+    Verzeichnis AUF DEM SQL SERVER fuer die Datei(en) der neu angelegten Filegroup(s), z.B.
+    'G:\SQLData\Partitions' - so landet die neue Filegroup auf einem Laufwerk der Wahl. Wird bei
+    Bedarf angelegt. Ohne Angabe: Standard-Datenpfad der Instanz. Siehe New-sqmPartitionFilegroupPlan.
 .PARAMETER FutureBufferPeriods
     Anzahl vorausschauend leer angelegter Perioden. Standard: 3.
 .PARAMETER ManualStartValue
@@ -211,6 +215,9 @@ function Invoke-sqmTablePartitionConversion
 
 		[Parameter(Mandatory = $false)]
 		[int]$FutureBufferPeriods = 3,
+
+		[Parameter(Mandatory = $false)]
+		[string]$FilePath,
 
 		[Parameter(Mandatory = $false)]
 		$ManualStartValue,
@@ -464,6 +471,7 @@ WHERE s.name = N'$Schema' AND t.name = N'$Table' AND c.name = N'$PartitionColumn
 		# 5. Filegroups + Partition Function/Scheme
 		# =========================================================================================
 		$fgParams = @{ SqlInstance = $SqlInstance; Database = $Database; TableName = $Table; BoundaryList = $boundaries; FilegroupStrategy = $FilegroupStrategy }
+		if ($FilePath) { $fgParams['FilePath'] = $FilePath }
 		if ($SqlCredential) { $fgParams['SqlCredential'] = $SqlCredential }
 		$fgPlan = New-sqmPartitionFilegroupPlan @fgParams -Confirm:$false
 

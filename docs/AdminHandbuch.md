@@ -8,7 +8,7 @@ Zielgruppe dieses Handbuchs: SQL-Server-DBAs, die das Tool operativ einsetzen (n
 Entwicklung des Moduls selbst). Fuer die Versionshistorie siehe [CHANGELOG.md](../CHANGELOG.md),
 fuer eine Kurzuebersicht [README.md](../README.md).
 
-Stand: 2026-10-01, sqmPartitionTool 1.15.1.0 (mit sqmDataTransfer 0.1.23.0).
+Stand: 2026-10-02, sqmPartitionTool 1.16.0.0 (mit sqmDataTransfer 0.1.23.0).
 
 ---
 
@@ -104,7 +104,13 @@ Ziel: eine bestehende, nicht partitionierte Tabelle wird in derselben Datenbank 
    (relevant fuer `-Method BatchedSwap`, siehe unten).
 2. **Granularitaet und Filegroup-Strategie festlegen** — Month/Quarter/Year, sowie `Single` (eine
    Filegroup fuer alle Partitionen) oder `PerPeriod` (eine eigene Filegroup je Periode — bessere
-   I/O-Isolation, mehr Verwaltungsaufwand).
+   I/O-Isolation, mehr Verwaltungsaufwand). Mit **`-FilePath`** landen die neuen Filegroup-Dateien
+   in einem Verzeichnis **auf dem SQL Server** nach Wahl, z.B. auf einem eigenen Laufwerk
+   (`-FilePath 'G:\SQLData\Partitions'`); ein fehlendes Verzeichnis wird angelegt, ein Laufwerk,
+   das es auf dem Server nicht gibt, bricht vor jeder Aenderung ab. Ohne Angabe: Standard-Datenpfad
+   der Instanz. Gilt nur fuer **neu** angelegte Filegroups, eine vorhandene wird nicht verschoben.
+   Derselbe Parameter steht bei `Invoke-sqmTableArchiveMigration` und `Copy-sqmPartitionedTable`
+   zur Verfuegung.
 3. **Konvertierung ausfuehren:**
    ```powershell
    Invoke-sqmTablePartitionConversion -SqlInstance "SQL01" -Database "Sales" -Schema "dbo" `
@@ -323,6 +329,15 @@ Quelltabelle wird nie umbenannt, nie durch eine View ersetzt und bleibt vollstae
      seit 1.15.0.0 ignoriert (Warnung).
    - `-MaxDurationMinutes` beendet den Lauf sauber zwischen zwei Partitionen, ein erneuter Aufruf
      setzt fort.
+   - **`-CreateTableOnly`** legt nur die neu partitionierte, leere Zieltabelle an (keine Daten,
+     keine Registrierung), z.B. um sie vor der Kopie zu pruefen oder die Kopie in ein spaeteres
+     Wartungsfenster zu legen. Ein Aufruf ohne den Schalter kopiert dann in die vorhandene Tabelle.
+     Existiert die Zieltabelle schon, passiert nichts (Status `TargetTableExists`).
+   - **`-FilePath`** legt die neuen Filegroups der Zieldatenbank auf ein Laufwerk der Wahl:
+     ```powershell
+     Copy-sqmPartitionedTable -SqlInstance "SQL01" -Database "Sales" -Schema "dbo" -Table "OrderHistory" `
+         -TargetDatabaseName "SalesReporting" -Granularity Year -FilePath 'G:\SQLData\Reporting' -CreateTableOnly
+     ```
    - Registriert die neue Tabelle in `sqm_PartitionRegistry` (ausser `-NoRegister`), Ablaufplan B1
      kann danach wie fuer jede andere partitionierte Tabelle eingerichtet werden.
 3. **Verifikation:** Zeilenzahlen von Quelle und Kopie werden am Ende abgeglichen. Weichen sie ab
@@ -421,7 +436,7 @@ Show-sqmPartitionToolGui -SqlInstance "SQL01"
 | 1 — Select Table | Kandidatentabellen (mit Zeilenzahl/Groesse/Heap-oder-Clustered) |
 | 2 — Select Column | Partitions-/Datumsspalte auswaehlen |
 | 3 — Min/Max Preview | Tatsaechlicher Wertebereich der Quelldaten (oder manuelle Werte bei leerer Tabelle) |
-| 4 — Granularity & Filegroups | Month/Quarter/Year, Single/PerPeriod, bei Nicht-Datumsspalten zusaetzlich Surrogate Date Format |
+| 4 — Granularity & Filegroups | Month/Quarter/Year, Single/PerPeriod, bei Nicht-Datumsspalten zusaetzlich Surrogate Date Format; *Data file folder (server)*: Verzeichnis fuer neue Filegroups, Auswahlliste mit den Laufwerken des Servers und deren freiem Platz (leer = Standard-Datenpfad) |
 | 5 — Boundary Preview | Berechnete Partitionsgrenzen zur Kontrolle vor der Ausfuehrung |
 | 6 — Archive & Retention | Zwei sich gegenseitig ausschliessende Modi (siehe unten) |
 | 7 — Summary & Execute | Zusammenfassung, Ausfuehren-Button, Live-Log |
@@ -439,7 +454,8 @@ Show-sqmPartitionToolGui -SqlInstance "SQL01"
   - **"Set up automatic maintenance"** fuehrt Ablaufplan A + B aus (in-place partitionieren,
     Sliding-Window, Retention). Bei aktivem "Migrate now" ist dieser Bereich ausgeblendet.
 - **Bereits partitioniert:** Copy-Modus (Ablaufplan D) mit Zieldatenbank und optionalem Zielnamen,
-  ohne Schluesselauswahl.
+  ohne Schluesselauswahl. Wahlweise *Create the partitioned target table only* (`-CreateTableOnly`)
+  oder *Create the target table AND copy the data*.
 
 "Finish" fragt nach, falls noch nichts ausgefuehrt wurde. Der Fenstertitel zeigt Modulversion und
 Ladepfad.

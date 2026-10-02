@@ -48,6 +48,10 @@
        (nur beim allerersten Aufruf, analog Invoke-sqmTablePartitionConversion), Registrierung der
        NEUEN Tabelle in sqm_PartitionRegistry (Register-sqmPartitionTable), ausser -NoRegister.
 
+    Mit -CreateTableOnly endet der Ablauf nach Schritt 3: die neu partitionierte Zieltabelle wird
+    nur angelegt (leer, keine Registrierung). Ein spaeterer Aufruf ohne den Schalter kopiert die
+    Daten in die dann vorhandene Tabelle und registriert sie.
+
     Die Quelltabelle wird von dieser Funktion NIE veraendert, umbenannt oder geloescht.
 
 .PARAMETER SqlInstance
@@ -80,6 +84,10 @@
     Nur relevant bei BoundaryType Int oder Text: 'yyyyMMdd' (Standard) oder 'yyyyMM'.
 .PARAMETER FilegroupStrategy
     Single (Standard) oder PerPeriod - fuer die NEUE Partitionierung in der Zieldatenbank.
+.PARAMETER FilePath
+    Verzeichnis AUF DEM SQL SERVER fuer die neue(n) Filegroup-Datei(en) in der Zieldatenbank, z.B.
+    'G:\SQLData\Partitions' - so landet die neue Filegroup auf einem Laufwerk der Wahl. Wird bei
+    Bedarf angelegt. Ohne Angabe: Standard-Datenpfad der Instanz. Siehe New-sqmPartitionFilegroupPlan.
 .PARAMETER FutureBufferPeriods
     Anzahl vorausschauend leer angelegter Perioden. Standard: 3.
 .PARAMETER DataCompression
@@ -95,6 +103,11 @@
     Bricht nach dieser Laufzeit sauber zwischen zwei Partitionen ab (0 = kein Limit, Standard) -
     fuer die gezielte Aufteilung sehr grosser Tabellen auf mehrere Wartungsfenster. Ein erneuter
     Aufruf setzt bei der ersten noch nicht vollstaendigen Partition fort.
+.PARAMETER CreateTableOnly
+    Nur die neu partitionierte Zieltabelle anlegen (Filegroup(s), Partition Function/Scheme,
+    Tabelle mit Indizes), KEINE Daten kopieren und nicht registrieren. Existiert die Zieltabelle
+    bereits, passiert nichts (Status 'TargetTableExists'). Ein spaeterer Aufruf ohne diesen
+    Schalter kopiert die Daten und registriert die Tabelle.
 .PARAMETER NoRegister
     Neue Tabelle NICHT in sqm_PartitionRegistry eintragen (z.B. fuer einen einmaligen Testabzug
     ohne automatische Wartungs-Jobs).
@@ -111,6 +124,11 @@
     # Ueber mehrere Wartungsfenster verteilt (je max. 90 Minuten)
     Copy-sqmPartitionedTable -SqlInstance "SQL01" -Database "Sales" -Schema "dbo" -Table "OrderHistory" `
         -TargetDatabaseName "SalesReporting" -Granularity Quarter -MaxDurationMinutes 90
+
+.EXAMPLE
+    # Nur die partitionierte Zieltabelle anlegen, Filegroup auf Laufwerk G: - Daten spaeter kopieren
+    Copy-sqmPartitionedTable -SqlInstance "SQL01" -Database "Sales" -Schema "dbo" -Table "OrderHistory" `
+        -TargetDatabaseName "SalesReporting" -Granularity Year -FilePath 'G:\SQLData\Reporting' -CreateTableOnly
 
 .NOTES
     Benoetigt: dbatools, Invoke-sqmLogging (sqmSQLTool), Copy-sqmTableData (sqmDataTransfer), Get-sqmPartitionColumnRange,
@@ -168,6 +186,9 @@ function Copy-sqmPartitionedTable
 		[int]$FutureBufferPeriods = 3,
 
 		[Parameter(Mandatory = $false)]
+		[string]$FilePath,
+
+		[Parameter(Mandatory = $false)]
 		[ValidateSet('None', 'Row', 'Page')]
 		[string]$DataCompression = 'None',
 
@@ -181,6 +202,9 @@ function Copy-sqmPartitionedTable
 		[Parameter(Mandatory = $false)]
 		[ValidateRange(0, 1440)]
 		[int]$MaxDurationMinutes = 0,
+
+		[Parameter(Mandatory = $false)]
+		[switch]$CreateTableOnly,
 
 		[Parameter(Mandatory = $false)]
 		[switch]$NoRegister,
@@ -281,7 +305,22 @@ WHERE s.name = N'$Schema' AND t.name = N'$Table' AND c.name = N'$PartitionColumn
 		# =========================================================================================
 		$targetExists = Invoke-DbaQuery @connParams -Database $Database -Query "SELECT 1 FROM [$TargetDatabaseName].sys.tables t JOIN [$TargetDatabaseName].sys.schemas s ON s.schema_id = t.schema_id WHERE s.name = N'$TargetSchemaName' AND t.name = N'$TargetTableName';" -ErrorAction Stop -EnableException -As PSObject
 
-		$action = if ($targetExists)
+		if ($CreateTableOnly -and $targetExists)
+		{
+			Invoke-sqmLogging -Message "-CreateTableOnly: '$TargetDatabaseName.$TargetSchemaName.$TargetTableName' existiert bereits - nichts anzulegen." -FunctionName $functionName -Level "INFO"
+			return [PSCustomObject]@{
+				SourceSchemaName = $Schema; SourceTableName = $Table
+				TargetDatabaseName = $TargetDatabaseName; TargetSchemaName = $TargetSchemaName; TargetTableName = $TargetTableName
+				PartitionColumn = $PartitionColumn; Granularity = $Granularity
+				RowsCopied = 0; TableCreated = $false; Registered = $false; Status = 'TargetTableExists'
+			}
+		}
+
+		$action = if ($CreateTableOnly)
+		{
+			"Neu partitionierte, LEERE Tabelle '$TargetDatabaseName.$TargetSchemaName.$TargetTableName' mit der Struktur von '$Schema.$Table' anlegen ($Granularity auf '$PartitionColumn', ohne Datenkopie)"
+		}
+		elseif ($targetExists)
 		{
 			"Kopie von '$Schema.$Table' nach '$TargetDatabaseName.$TargetSchemaName.$TargetTableName' fortsetzen (Zieltabelle existiert bereits)"
 		}
@@ -306,6 +345,7 @@ WHERE s.name = N'$Schema' AND t.name = N'$Table' AND c.name = N'$PartitionColumn
 			Invoke-sqmLogging -Message "$($boundaries.Count) Boundary(s) berechnet -> $($boundaries.Count + 1) Partition(en) in '$TargetDatabaseName'." -FunctionName $functionName -Level "INFO"
 
 			$fgParams = @{ SqlInstance = $SqlInstance; Database = $TargetDatabaseName; TableName = $TargetTableName; BoundaryList = $boundaries; FilegroupStrategy = $FilegroupStrategy }
+			if ($FilePath) { $fgParams['FilePath'] = $FilePath }
 			if ($SqlCredential) { $fgParams['SqlCredential'] = $SqlCredential }
 			$fgPlan = New-sqmPartitionFilegroupPlan @fgParams -Confirm:$false
 
@@ -358,6 +398,19 @@ WHERE s.name = N'$Schema' AND t.name = N'$Table' AND c.name = N'$PartitionColumn
 		else
 		{
 			Invoke-sqmLogging -Message "Zieltabelle '$TargetDatabaseName.$TargetSchemaName.$TargetTableName' existiert bereits - setze die Kopie fort (Schritt 4 uebersprungen)." -FunctionName $functionName -Level "INFO"
+		}
+
+		if ($CreateTableOnly)
+		{
+			Invoke-sqmLogging -Message "-CreateTableOnly: '$TargetDatabaseName.$TargetSchemaName.$TargetTableName' angelegt, keine Daten kopiert, nicht registriert." -FunctionName $functionName -Level "INFO"
+			return [PSCustomObject]@{
+				SourceSchemaName = $Schema; SourceTableName = $Table
+				TargetDatabaseName = $TargetDatabaseName; TargetSchemaName = $TargetSchemaName; TargetTableName = $TargetTableName
+				PartitionColumn = $PartitionColumn; Granularity = $Granularity
+				PartitionFunctionName = $schemeInfo.PartitionFunctionName; PartitionSchemeName = $schemeInfo.PartitionSchemeName
+				FilegroupNames = $fgPlan.FilegroupNames; FilePath = $fgPlan.FilePath
+				RowsCopied = 0; TableCreated = $true; Registered = $false; Status = 'TableCreated'
+			}
 		}
 
 		# =========================================================================================

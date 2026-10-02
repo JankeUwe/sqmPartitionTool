@@ -29,7 +29,11 @@ mit den Kopierroutinen von [sqmDataTransfer](https://github.com/JankeUwe/sqmData
 - Bereits partitionierte Tabelle als neue, eigenstaendige Kopie mit ANDERER
   Partitionierung (Granularitaet/Filegroup-Strategie) in eine andere Datenbank
   kopieren (`Copy-sqmPartitionedTable`) — resumable, ohne Cutover, die
-  Quelltabelle bleibt vollstaendig unveraendert aktiv.
+  Quelltabelle bleibt vollstaendig unveraendert aktiv. Wahlweise nur die leere,
+  neu partitionierte Zieltabelle anlegen (`-CreateTableOnly`) und spaeter kopieren.
+- Neue Filegroups auf einem Laufwerk der Wahl anlegen (`-FilePath`, Verzeichnis
+  auf dem Server, wird bei Bedarf angelegt), bei Konvertierung, Archiv-Migration
+  und Kopie, in der GUI mit Laufwerksliste und freiem Platz.
 - WinForms-GUI-Assistent (`Show-sqmPartitionToolGui`) und vollständige CLI
   (alle Kernfunktionen sind eigenständig aus der PowerShell-Konsole nutzbar).
 
