@@ -300,6 +300,17 @@ Live-verified against DEV01 (5000 rows across 28 monthly partitions, 24 months o
 partitions older than the cutoff (2289 rows), left the remaining 16 partitions untouched, `-WhatIf`
 correctly removed nothing, and a second run correctly reported nothing left to do.
 
+Re-verified 2026-10-06 with 1.16.0.0 under Windows PowerShell 5.1 on a realistic table: a copy of
+CORO_DB `dbo.GARCHIVE` (100,000 rows, heap with a `text` column, `int` yyyyMMdd surrogate key
+`VTDAT`), backdated to cover 2012-01 to 2026-12, converted to 184 monthly partitions, then
+`-RetentionValue 10 -RetentionUnit Years` without archive (cutoff 2016-10-06). `-WhatIf` announced
+58 partitions and changed nothing; the real run removed exactly those 58 partitions (31,687 rows,
+124 s), no row older than 2016-10-01 left, the checksum of the 68,313 kept rows (including `VDATA`)
+unchanged, boundaries 183 -> 125, no staging table left behind, a second run `NothingToDo`.
+Removal is per whole partition: the month that contains the cutoff (2016-10) stays until its upper
+boundary has passed, and after the MERGE the lowest remaining partition holds everything below
+20161101.
+
 ## [1.9.1.0] — 2026-08-29
 
 ### Doc fix: `-ViewCutover` read-consistency claim, after live verification against DEV01
