@@ -7,7 +7,8 @@
     Tabelle kann jederzeit wieder aktiviert werden) oder loescht den Registry-Eintrag ganz
     (-Purge). Die Tabelle SELBST bleibt in jedem Fall partitioniert - dies entfernt nur die
     automatische Wartung durch sqm_ExtendPartitionWindow/sqm_RetirePartitionWindow, keine
-    Partitionierungs-DDL wird rueckgaengig gemacht.
+    Partitionierungs-DDL wird rueckgaengig gemacht. Um die Partitionierung selbst zu entfernen:
+    Remove-sqmTablePartitioning (loescht dabei auch den Registry-Eintrag).
 
 .PARAMETER SqlInstance
     Ziel-Instanz.

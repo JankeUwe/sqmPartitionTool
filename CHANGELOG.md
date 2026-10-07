@@ -1,5 +1,50 @@
 ﻿# sqmPartitionTool — Changelog
 
+## [1.17.0.0] — 2026-10-07
+
+### Remove partitioning from a table (`Remove-sqmTablePartitioning`)
+
+New counterpart to `Invoke-sqmTablePartitionConversion`: turns a partitioned table back into a
+plain table on one filegroup and removes the partitioning objects.
+
+- Clustered index / PRIMARY KEY / UNIQUE constraint and every nonclustered index on the partition
+  scheme are rebuilt with `CREATE ... WITH (DROP_EXISTING = ON) ON [<filegroup>]`, definition
+  unchanged (keys, INCLUDE, filter, uniqueness, fill factor, lock options, compression).
+  Constraints survive, including ones referenced by foreign keys; LOB data moves along; disabled
+  indexes are moved and disabled again.
+- A partitioned heap is moved via a temporary clustered index (`sqmUnpartitionTmp`), created on
+  the target filegroup and dropped again; heap compression is kept.
+- Columnstore: on a partitioned table SQL Server requires every columnstore index to be
+  partition-aligned and rejects any `DROP_EXISTING` move (also via a rowstore step or
+  `DROP INDEX ... MOVE TO`). A nonclustered columnstore index, and with a clustered columnstore
+  index all nonclustered indexes, are dropped first and recreated afterwards with the same
+  definition (PK/UNIQUE via `ALTER TABLE ... ADD CONSTRAINT`; aborts before any change if a foreign
+  key references such a constraint). A clustered columnstore index is dropped, the heap moved, and
+  the index recreated on the target filegroup. If a run stops in between, the error message
+  contains the DDL of the indexes still missing.
+- Partition scheme and function are dropped once nothing else uses them (shared ones stay, with a
+  warning). `-RemoveEmptyFilegroups` also removes the scheme's now empty filegroups with their files
+  (never PRIMARY, the default or the target filegroup).
+- The `sqm_PartitionRegistry` entry is deleted so the maintenance jobs skip the table
+  (`-KeepRegistration` keeps it). `-WhatIf` returns the planned DDL, `-Online` uses ONLINE index
+  operations on Enterprise/Developer (not possible with a columnstore index, falls back with a
+  warning).
+- Re-runnable: continues with the indexes still on the scheme, cleans up a leftover temporary
+  index, and finds the scheme/function through the registry entry when the table itself is already
+  unpartitioned.
+- Not reverted: a PRIMARY KEY/UNIQUE constraint extended by the partition column during conversion
+  (`-AllowKeyChange`) keeps that column.
+
+GUI step 1 (*Select Table*) has a **Remove partitioning...** button for already partitioned tables
+(dialog: target filegroup, remove empty filegroups, ONLINE); the table list reloads afterwards.
+
+Verified on SQL Server 2022 (Developer, Docker) under PS 5.1: clustered PK with incoming foreign
+key, LOB column, PAGE compression, NC index with INCLUDE and fill factor, disabled index
+and nonclustered columnstore, 21 PerPeriod filegroups removed, registry entry deleted; partitioned
+heap with ROW compression; clustered columnstore with nonclustered index and nonclustered PK
+(`-Online`, falls back); shared scheme kept until its last table; leftover temporary index; repeated
+call returns `NotPartitioned`; the GUI button path end to end. Row counts unchanged in all cases.
+
 ## [1.16.0.0] — 2026-10-02
 
 ### New filegroup on a drive of choice (`-FilePath`)

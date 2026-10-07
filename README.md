@@ -34,6 +34,11 @@ mit den Kopierroutinen von [sqmDataTransfer](https://github.com/JankeUwe/sqmData
 - Neue Filegroups auf einem Laufwerk der Wahl anlegen (`-FilePath`, Verzeichnis
   auf dem Server, wird bei Bedarf angelegt), bei Konvertierung, Archiv-Migration
   und Kopie, in der GUI mit Laufwerksliste und freiem Platz.
+- Partitionierung einer Tabelle vollstaendig wieder entfernen
+  (`Remove-sqmTablePartitioning`) — alle Indizes zurueck auf eine Filegroup,
+  Partition Scheme/Function droppen, optional die leeren Filegroups samt Dateien
+  entfernen, Wartungsregistrierung loeschen. In der GUI ueber *Remove partitioning...*
+  in der Tabellenauswahl.
 - WinForms-GUI-Assistent (`Show-sqmPartitionToolGui`) und vollständige CLI
   (alle Kernfunktionen sind eigenständig aus der PowerShell-Konsole nutzbar).
 
@@ -64,6 +69,10 @@ Invoke-sqmTablePartitionConversion -SqlInstance "SQL01" -Database "Sales" `
 # Wartungs-Jobs anlegen (Erweiterung + Retention)
 New-sqmPartitionExtendJob -SqlInstance "SQL01"
 New-sqmPartitionRetentionJob -SqlInstance "SQL01"
+
+# Partitionierung wieder entfernen (erst ansehen, dann ausfuehren)
+Remove-sqmTablePartitioning -SqlInstance "SQL01" -Database "Sales" `
+    -Schema "dbo" -Table "OrderHistory" -RemoveEmptyFilegroups -WhatIf
 ```
 
 Siehe [docs/AdminHandbuch.md](docs/AdminHandbuch.md) für detaillierte Ablaufplaene je Szenario

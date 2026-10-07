@@ -28,6 +28,10 @@
       Copy-sqmPartitionedTable (neu partitionierte, eigenstaendige Kopie in einer anderen Datenbank,
       OHNE Cutover - die Quelle bleibt unter ihrem bisherigen Schema vollstaendig unveraendert aktiv).
 
+    Ausserhalb des Durchlaufs: in Schritt 1 entfernt "Remove partitioning..." bei einer bereits
+    partitionierten Tabelle deren Partitionierung (Remove-sqmTablePartitioning, Dialog mit
+    Ziel-Filegroup, leere Filegroups entfernen, ONLINE); die Tabellenliste wird danach neu geladen.
+
 .PARAMETER SqlInstance
     SQL-Instanz, die beim Oeffnen vorbelegt wird.
 
@@ -400,6 +404,138 @@
         $grid1.Columns.Add($col) | Out-Null
     }
     $p1.Controls.Add($grid1)
+
+    # Leiste unter der Tabellenliste: Partitionierung einer bereits partitionierten Tabelle
+    # entfernen (Remove-sqmTablePartitioning) - ausserhalb des Wizard-Durchlaufs, die Liste wird
+    # danach neu geladen.
+    $p1Bar = New-Object System.Windows.Forms.Panel
+    $p1Bar.Dock = 'Bottom'
+    $p1Bar.Height = 40
+    $p1Bar.BackColor = $cPanel
+    $btn1Unpartition = New-Object System.Windows.Forms.Button
+    $btn1Unpartition.Text = 'Remove partitioning...'
+    $btn1Unpartition.Location = New-Object System.Drawing.Point(0, 6)
+    $btn1Unpartition.Size = New-Object System.Drawing.Size(170, 28)
+    $btn1Unpartition.Enabled = $false
+    & $styleButton $btn1Unpartition
+    $lbl1Unpartition = New-Object System.Windows.Forms.Label
+    $lbl1Unpartition.Text = 'For an already partitioned table: move it back onto one filegroup and drop its partition scheme/function.'
+    $lbl1Unpartition.Location = New-Object System.Drawing.Point(180, 12)
+    $lbl1Unpartition.AutoSize = $true
+    $lbl1Unpartition.ForeColor = $cDim
+    $p1Bar.Controls.Add($btn1Unpartition)
+    $p1Bar.Controls.Add($lbl1Unpartition)
+    $p1.Controls.Add($p1Bar)
+    $grid1.BringToFront()
+
+    $grid1.Add_SelectionChanged({
+        $btn1Unpartition.Enabled = ($grid1.SelectedRows.Count -gt 0 -and $grid1.SelectedRows[0].Cells['Status'].Value -eq 'already partitioned')
+    })
+
+    $btn1Unpartition.Add_Click({
+        if ($grid1.SelectedRows.Count -eq 0) { return }
+        $r = $grid1.SelectedRows[0]
+        $uSchema = [string]$r.Cells['Schema'].Value
+        $uTable = [string]$r.Cells['Tabelle'].Value
+        $cp = $script:connParams
+
+        try
+        {
+            $fgRows = @(Invoke-DbaQuery @cp -SqlInstance $script:wiz.SqlInstance -Database $script:wiz.Database -Query "SELECT name, is_default FROM sys.filegroups WHERE type = 'FG' ORDER BY is_default DESC, name;" -EnableException -As PSObject)
+        }
+        catch { Set-Status "Error: $($_.Exception.Message)" 'Error'; return }
+
+        $dlg = New-Object System.Windows.Forms.Form
+        $dlg.Text = "Remove partitioning - $uSchema.$uTable"
+        $dlg.Size = New-Object System.Drawing.Size(560, 290)
+        $dlg.StartPosition = 'CenterParent'
+        $dlg.FormBorderStyle = 'FixedDialog'
+        $dlg.MaximizeBox = $false
+        $dlg.MinimizeBox = $false
+        $dlg.BackColor = $cPanel
+        $dlg.ForeColor = $cText
+        $dlg.Font = $form.Font
+
+        $lblU1 = New-Object System.Windows.Forms.Label
+        $lblU1.Text = "All indexes of '$uSchema.$uTable' are rebuilt onto one filegroup (data stays unchanged).`nPartition scheme and function are dropped if nothing else uses them; the maintenance`nregistration of the table is removed."
+        $lblU1.Location = New-Object System.Drawing.Point(12, 10)
+        $lblU1.Size = New-Object System.Drawing.Size(530, 50)
+        $lblU1.ForeColor = $cDim
+        $lblU2 = New-Object System.Windows.Forms.Label
+        $lblU2.Text = 'Target filegroup:'
+        $lblU2.Location = New-Object System.Drawing.Point(12, 74)
+        $lblU2.AutoSize = $true
+        $cmbU = New-Object System.Windows.Forms.ComboBox
+        $cmbU.Location = New-Object System.Drawing.Point(140, 70)
+        $cmbU.Size = New-Object System.Drawing.Size(250, 24)
+        $cmbU.DropDownStyle = 'DropDownList'
+        $cmbU.FlatStyle = 'Flat'
+        $cmbU.BackColor = $cWindow
+        $cmbU.ForeColor = $cText
+        foreach ($fg in $fgRows) { [void]$cmbU.Items.Add([string]$fg.name) }
+        if ($cmbU.Items.Count -gt 0) { $cmbU.SelectedIndex = 0 }
+        $chkUFg = New-Object System.Windows.Forms.CheckBox
+        $chkUFg.Text = 'Remove the now empty filegroups of the partition scheme (incl. their files)'
+        $chkUFg.Location = New-Object System.Drawing.Point(12, 106)
+        $chkUFg.Size = New-Object System.Drawing.Size(530, 22)
+        $chkUFg.Checked = $true
+        $chkUOnline = New-Object System.Windows.Forms.CheckBox
+        $chkUOnline.Text = 'ONLINE index operations (Enterprise/Developer only, otherwise offline)'
+        $chkUOnline.Location = New-Object System.Drawing.Point(12, 132)
+        $chkUOnline.Size = New-Object System.Drawing.Size(530, 22)
+        $btnUOk = New-Object System.Windows.Forms.Button
+        $btnUOk.Text = 'Remove partitioning'
+        $btnUOk.Location = New-Object System.Drawing.Point(266, 200)
+        $btnUOk.Size = New-Object System.Drawing.Size(160, 30)
+        $btnUOk.DialogResult = 'OK'
+        & $styleButton $btnUOk
+        $btnUCancel = New-Object System.Windows.Forms.Button
+        $btnUCancel.Text = 'Cancel'
+        $btnUCancel.Location = New-Object System.Drawing.Point(434, 200)
+        $btnUCancel.Size = New-Object System.Drawing.Size(100, 30)
+        $btnUCancel.DialogResult = 'Cancel'
+        & $styleButton $btnUCancel
+        $dlg.AcceptButton = $btnUOk
+        $dlg.CancelButton = $btnUCancel
+        foreach ($c in @($lblU1, $lblU2, $cmbU, $chkUFg, $chkUOnline, $btnUOk, $btnUCancel)) { $dlg.Controls.Add($c) }
+
+        if ($dlg.ShowDialog($form) -ne 'OK') { return }
+
+        $uParams = @{
+            SqlInstance           = $script:wiz.SqlInstance
+            Database              = $script:wiz.Database
+            Schema                = $uSchema
+            Table                 = $uTable
+            TargetFilegroup       = [string]$cmbU.SelectedItem
+            RemoveEmptyFilegroups = $chkUFg.Checked
+            Online                = $chkUOnline.Checked
+        }
+        if ($cp.ContainsKey('SqlCredential')) { $uParams['SqlCredential'] = $cp['SqlCredential'] }
+
+        Set-Status "Removing partitioning of '$uSchema.$uTable' (rebuilding all indexes) ..." 'Info'
+        $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+        try
+        {
+            $res = Remove-sqmTablePartitioning @uParams -Confirm:$false
+            $form.Cursor = [System.Windows.Forms.Cursors]::Default
+            $summary = "Partitioning of '$uSchema.$uTable' removed.`n`n" +
+                "Indexes moved to '$($res.TargetFilegroup)': $($res.IndexesMoved -join ', ')`n" +
+                "Dropped partition scheme(s): $(if ($res.DroppedPartitionSchemes) { $res.DroppedPartitionSchemes -join ', ' } else { '-' })`n" +
+                "Dropped partition function(s): $(if ($res.DroppedPartitionFunctions) { $res.DroppedPartitionFunctions -join ', ' } else { '-' })`n" +
+                "Removed filegroup(s): $(if ($res.RemovedFilegroups) { $res.RemovedFilegroups -join ', ' } else { '-' })`n" +
+                "Maintenance registration removed: $(if ($res.Unregistered) { 'yes' } else { 'no (was not registered)' })"
+            if ($res.Warnings.Count -gt 0) { $summary += "`n`nWarnings:`n- $($res.Warnings -join "`n- ")" }
+            [void][System.Windows.Forms.MessageBox]::Show($summary, 'Remove partitioning', 'OK', $(if ($res.Warnings.Count -gt 0) { 'Warning' } else { 'Information' }))
+            Load-Step1
+            Set-Status "Partitioning of '$uSchema.$uTable' removed." 'OK'
+        }
+        catch
+        {
+            $form.Cursor = [System.Windows.Forms.Cursors]::Default
+            Set-Status "Error: $($_.Exception.Message)" 'Error'
+            [void][System.Windows.Forms.MessageBox]::Show($_.Exception.Message, 'Remove partitioning - error', 'OK', 'Error')
+        }
+    })
 
     function Load-Step1
     {

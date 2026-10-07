@@ -8,7 +8,7 @@ Zielgruppe dieses Handbuchs: SQL-Server-DBAs, die das Tool operativ einsetzen (n
 Entwicklung des Moduls selbst). Fuer die Versionshistorie siehe [CHANGELOG.md](../CHANGELOG.md),
 fuer eine Kurzuebersicht [README.md](../README.md).
 
-Stand: 2026-10-02, sqmPartitionTool 1.16.0.0 (mit sqmDataTransfer 0.1.23.0).
+Stand: 2026-10-07, sqmPartitionTool 1.17.0.0 (mit sqmDataTransfer 0.1.23.0).
 
 ---
 
@@ -21,6 +21,7 @@ Stand: 2026-10-02, sqmPartitionTool 1.16.0.0 (mit sqmDataTransfer 0.1.23.0).
 - [5. Ablaufplan C: Tabelle in eine Archiv-Datenbank migrieren (Cutover)](#5-ablaufplan-c-tabelle-in-eine-archiv-datenbank-migrieren)
 - [5a. Ablaufplan D: Bereits partitionierte Tabelle mit neuer Partitionierung kopieren](#5a-ablaufplan-d-bereits-partitionierte-tabelle-mit-neuer-partitionierung-kopieren)
 - [5b. Wie die Daten kopiert werden (Kopier-Engine von sqmDataTransfer)](#5b-wie-die-daten-kopiert-werden)
+- [5c. Ablaufplan E: Partitionierung wieder entfernen](#5c-ablaufplan-e-partitionierung-wieder-entfernen)
 - [6. BoundaryType/SurrogateDateFormat — Referenz](#6-boundarytypesurrogatedateformat--referenz)
 - [7. GUI-Assistent: Schritt-fuer-Schritt](#7-gui-assistent-schritt-fuer-schritt)
 - [8. Troubleshooting und bekannte Einschraenkungen](#8-troubleshooting-und-bekannte-einschraenkungen)
@@ -30,7 +31,7 @@ Stand: 2026-10-02, sqmPartitionTool 1.16.0.0 (mit sqmDataTransfer 0.1.23.0).
 
 ## 1. Ueberblick
 
-Das Modul deckt fuenf unterschiedliche, unabhaengig voneinander nutzbare Szenarien ab. Die
+Das Modul deckt sechs unterschiedliche, unabhaengig voneinander nutzbare Szenarien ab. Die
 Entscheidung, welches passt, haengt davon ab, **wo die Daten am Ende liegen sollen** und **ob die
 Tabelle aktiv bleibt**:
 
@@ -41,6 +42,7 @@ Tabelle aktiv bleibt**:
 | **B2** — Retention/Archivierung | `New-sqmPartitionRetentionJob` (SQL-Agent-Job) | Alte Partitionen werden geloescht oder vorher archiviert | Nach A: alte Daten nach X Monaten/Jahren automatisch entfernen |
 | **C** — Archiv-DB-Migration + Cutover | `Invoke-sqmTableArchiveMigration` | Umbenannt, durch eine View auf die Archiv-DB ersetzt | Ganze Tabelle soll dauerhaft in eine andere (typischerweise kleinere/langsamer angebundene) Datenbank umziehen, Anwendungscode aber unveraendert weiterlaufen |
 | **D** — Neu-partitionierte Kopie | `Copy-sqmPartitionedTable` | **Unveraendert, bleibt aktiv** (keine Umbenennung, kein Cutover) | Eine **bereits partitionierte** Tabelle soll zusaetzlich als eigenstaendige Kopie mit **anderer** Granularitaet/Filegroup-Strategie in einer anderen Datenbank existieren (z.B. Reporting-Abzug mit groeberer Granularitaet) |
+| **E** — Partitionierung entfernen | `Remove-sqmTablePartitioning` | Bleibt in derselben DB, liegt wieder unpartitioniert auf einer Filegroup | Partitionierung soll zurueckgenommen werden (z.B. Konvertierung aus A rueckgaengig machen) |
 
 **Faustregel:** Wenn die Tabelle **in der Quelldatenbank bleiben** soll → A (+ optional B1/B2).
 Wenn die Tabelle **komplett in eine andere Datenbank** soll (z.B. Archiv-Instanz, separate
@@ -401,6 +403,83 @@ Ueber den Client waeren beide nur ein zusaetzlicher Netzweg.
 
 ---
 
+## 5c. Ablaufplan E: Partitionierung wieder entfernen
+
+Ziel: eine partitionierte Tabelle soll wieder eine ganz normale, unpartitionierte Tabelle auf
+einer Filegroup werden, z.B. weil sich die Partitionierung nicht bewaehrt hat, die Tabelle viel
+kleiner geworden ist oder eine Konvertierung (Ablaufplan A) zurueckgenommen werden soll. Die Daten
+bleiben unveraendert, nur ihr Speicherort aendert sich.
+
+1. **Ansehen, ohne etwas zu aendern** (`-WhatIf` gibt die geplante DDL zurueck):
+   ```powershell
+   $plan = Remove-sqmTablePartitioning -SqlInstance "SQL01" -Database "Sales" -Schema "dbo" `
+       -Table "OrderHistory" -RemoveEmptyFilegroups -WhatIf
+   $plan.Statements
+   ```
+2. **Ausfuehren:**
+   ```powershell
+   Remove-sqmTablePartitioning -SqlInstance "SQL01" -Database "Sales" -Schema "dbo" `
+       -Table "OrderHistory" -TargetFilegroup "PRIMARY" -RemoveEmptyFilegroups -Confirm:$false
+   ```
+   Ablauf im Detail:
+   - **Pre-Flight ohne Aenderung:** Tabelle vorhanden, keine Memory-Optimized-Tabelle, keine
+     XML-/Spatial-Indizes (vorher entfernen), Ziel-Filegroup vorhanden. Ohne `-TargetFilegroup`
+     wird die Standard-Filegroup der Datenbank verwendet (meist PRIMARY).
+   - **Clustered Index / PRIMARY KEY / UNIQUE-Constraint und jeder Nonclustered Index** werden
+     per `CREATE ... WITH (DROP_EXISTING = ON) ON [<Filegroup>]` mit unveraenderter Definition neu
+     aufgebaut: Schluessel, INCLUDE, Filter, Eindeutigkeit, Fuellfaktor, Sperroptionen und
+     Kompression bleiben erhalten. Constraints bleiben bestehen, auch wenn Fremdschluessel darauf
+     verweisen. LOB-Daten ziehen mit um. Deaktivierte Indizes werden mitverschoben und danach
+     wieder deaktiviert.
+   - **Heap:** SQL Server kann einen Heap nicht direkt verschieben. Es wird ein temporaerer
+     Clustered Index `sqmUnpartitionTmp` auf der Ziel-Filegroup angelegt und sofort wieder
+     entfernt. Die Kompression des Heaps bleibt erhalten.
+   - **Columnstore:** auf einer partitionierten Tabelle muss ein Columnstore Index partitions-
+     ausgerichtet sein, ein Umzug per `DROP_EXISTING` lehnt SQL Server ab. Ein Nonclustered
+     Columnstore Index, und bei einem Clustered Columnstore Index alle Nonclustered-Indizes,
+     werden deshalb vor dem Umbau entfernt und danach mit derselben Definition neu angelegt
+     (PRIMARY KEY/UNIQUE per `ALTER TABLE ... ADD CONSTRAINT`). Ein Clustered Columnstore Index
+     selbst wird entfernt, die Tabelle als Heap umgezogen und der Index auf der Ziel-Filegroup neu
+     angelegt (die Daten werden dabei einmal dekomprimiert und neu komprimiert). Verweisen
+     Fremdschluessel auf einen so neu anzulegenden Constraint, bricht die Funktion vor jeder
+     Aenderung ab.
+   - **Partition Scheme und Partition Function** werden gedroppt, sobald kein anderes Objekt sie
+     mehr verwendet. Teilen sich mehrere Tabellen ein Scheme, bleibt es mit Warnung bestehen und
+     wird beim Entfernen der letzten Tabelle abgeraeumt.
+   - **`-RemoveEmptyFilegroups`:** die Filegroups des Schemes, die danach leer sind, werden samt
+     Dateien entfernt (`DBCC SHRINKFILE ... EMPTYFILE`, `REMOVE FILE`, `REMOVE FILEGROUP`). Nie
+     PRIMARY, die Standard-Filegroup oder die Ziel-Filegroup. Scheitert das (im FULL-Recovery-
+     Modell z.B. bis zur naechsten Protokollsicherung), gibt es nur eine Warnung.
+   - **Registry:** der Eintrag in `master.dbo.sqm_PartitionRegistry` wird geloescht, die
+     Wartungs-Jobs (Ablaufplan B) beruecksichtigen die Tabelle danach nicht mehr. Mit
+     `-KeepRegistration` bleibt er stehen.
+   - **`-Online`:** auf Enterprise/Developer laufen die Rowstore-Indexoperationen online. Hat die
+     Tabelle einen Columnstore Index, geht das nicht (Warnung, offline).
+3. **Ergebnis pruefen:** das Rueckgabeobjekt nennt verschobene Indizes, gedroppte Schemes,
+   Functions und Filegroups sowie alle Warnungen. Ein erneuter Aufruf meldet `NotPartitioned`.
+
+**Wiederholbar:** bricht ein Lauf ab, setzt ein erneuter Aufruf bei den noch partitionierten
+Indizes fort (auch ein zurueckgebliebener `sqmUnpartitionTmp` wird abgeraeumt). Ist die Tabelle
+schon unpartitioniert, aber Scheme/Function noch da, findet der erneute Aufruf sie ueber den
+Registry-Eintrag. Wurden fuer den Columnstore-Umbau Indizes entfernt und nicht mehr neu angelegt,
+steht ihre DDL in der Fehlermeldung.
+
+**Nicht rueckgaengig gemacht** wird die Erweiterung eines PRIMARY KEY/UNIQUE-Constraints um die
+Partitionsspalte (`-AllowKeyChange` bei Ablaufplan A): welche Spalte damals angehaengt wurde, ist
+nicht mehr feststellbar, und sie zu entfernen wuerde die Eindeutigkeit aendern. Ebenso bleibt ein
+bei der Konvertierung eines Heaps angelegter Clustered Index `IX_<Tabelle>_<Spalte>` als normaler
+Clustered Index bestehen.
+
+**Aufwand:** jeder Index wird einmal komplett neu geschrieben, Dauer und Transaktionsprotokoll wie
+bei einem Index-Rebuild. Bei Heaps mit Nonclustered-Indizes werden diese durch den temporaeren
+Clustered Index zweimal zusaetzlich neu aufgebaut. Fuer grosse Tabellen ein Wartungsfenster
+einplanen.
+
+In der GUI: Schritt 1 (*Select Table*), bereits partitionierte Tabelle markieren,
+**Remove partitioning...**, Ziel-Filegroup waehlen.
+
+---
+
 ## 6. BoundaryType/SurrogateDateFormat — Referenz
 
 Alle Partitionierungs-/Migrationsfunktionen unterstuetzen drei Spaltentypen fuer die
@@ -433,7 +512,7 @@ Show-sqmPartitionToolGui -SqlInstance "SQL01"
 | Schritt | Inhalt |
 |---|---|
 | 0 — Connection | Instanz + Authentifizierung (Windows oder SQL Server Login), Datenbank waehlen |
-| 1 — Select Table | Kandidatentabellen (mit Zeilenzahl/Groesse/Heap-oder-Clustered) |
+| 1 — Select Table | Kandidatentabellen (mit Zeilenzahl/Groesse/Heap-oder-Clustered); bei einer bereits partitionierten Tabelle entfernt *Remove partitioning...* deren Partitionierung (Ablaufplan E, ausserhalb des Durchlaufs) |
 | 2 — Select Column | Partitions-/Datumsspalte auswaehlen |
 | 3 — Min/Max Preview | Tatsaechlicher Wertebereich der Quelldaten (oder manuelle Werte bei leerer Tabelle) |
 | 4 — Granularity & Filegroups | Month/Quarter/Year, Single/PerPeriod, bei Nicht-Datumsspalten zusaetzlich Surrogate Date Format; *Data file folder (server)*: Verzeichnis fuer neue Filegroups, Auswahlliste mit den Laufwerken des Servers und deren freiem Platz (leer = Standard-Datenpfad) |
@@ -492,6 +571,14 @@ Ladepfad.
   jeweiligen Batches kurzzeitig die betroffenen Zeilen/Partitionen, der atomare Cutover die ganze
   Quelltabelle fuer die Dauer des letzten Abgleichs. Fuer produktive Systeme Wartungsfenster oder
   Zeiten mit geringer Last einplanen.
+- **Remove-sqmTablePartitioning: "Nicht unterstuetzte Indextypen"**: XML- oder Spatial-Indizes
+  vorher entfernen und danach neu anlegen.
+- **Remove-sqmTablePartitioning: Partition Scheme bleibt bestehen**: ein anderes Objekt verwendet
+  es noch (die Warnung nennt es). Wird beim Entfernen der Partitionierung des letzten Objekts
+  abgeraeumt.
+- **Remove-sqmTablePartitioning: Filegroup nicht entfernt**: im FULL-Recovery-Modell ist eine
+  geleerte Datei oft erst nach der naechsten Protokollsicherung entfernbar. Danach mit
+  `ALTER DATABASE ... REMOVE FILE`/`REMOVE FILEGROUP` nacharbeiten.
 
 ---
 
