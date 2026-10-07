@@ -1,5 +1,47 @@
 ﻿# sqmPartitionTool — Changelog
 
+## [1.18.0.0] — 2026-10-07
+
+### `Remove-sqmTablePartitioning -TruncateData`: empty an archived table, then unpartition it
+
+For the table left behind by an archive migration cutover (`<X>_Original`, data already in the
+archive database, `<X>` is a view onto it): instead of rebuilding terabytes onto one filegroup,
+the table is emptied with `TRUNCATE TABLE` first, the unpartitioning then takes seconds and the
+partition filegroups become free.
+
+- Checked before anything changes, from metadata only (no scan): the archive table exists, is not
+  the table itself and has at least as many rows as the table to be emptied. Without
+  `-ArchiveTable 'Db.Schema.Table'` it is derived from the view `<X>` for a table named
+  `<X>_Original`. `-SkipArchiveCheck` turns the comparison off (warning).
+- Blocked with a clear message when TRUNCATE would fail: foreign keys from other tables, indexed
+  views, replication, CDC.
+- On top of the normal confirmation, a separate prompt before the TRUNCATE that
+  `-Confirm:$false` does not suppress; only `-Force` does (unattended runs). In a non-interactive
+  session without `-Force` the call stops with a clear message, nothing changed.
+- GUI: *Delete ALL data first (TRUNCATE)* in the *Remove partitioning* dialog (never pre-selected),
+  optional archive table field, own warning dialog.
+
+### Space check before unpartitioning
+
+Without `-TruncateData` the function now checks before any change whether the table (all indexes,
+reserved pages) fits into the target filegroup: free space inside its files plus possible
+autogrowth up to the volume (`sys.dm_os_volume_stats`) or file limit. Not enough: error with the
+numbers. Tight (less than 20 % margin for sort space) or growth needed: warning. FULL recovery
+model and more than 1 GB: warning about log volume. `-SkipSpaceCheck` turns it off. Result object:
+`SpaceNeededMB`, `SpaceAvailableMB`.
+
+### Registry entries pointing to the dropped scheme are removed too
+
+After a cutover the registry entry is listed under the view name `<X>`, not under `<X>_Original`.
+Every entry of the same database that points to a now dropped partition scheme is deleted as well
+(unless `-KeepRegistration`); new result property `UnregisteredTables`.
+
+Verified on SQL Server 2022 (Docker) under PS 5.1: cutover scenario with archive derived from the
+view, truncate + unpartition + 9 filegroups removed + registry entry under the view name removed,
+view still returns all rows; abort on incomplete archive (rows unchanged), on an incoming foreign
+key, and non-interactive without `-Force`; space check blocks an 8 MB filegroup without growth for
+a 39 MB table and passes PRIMARY with autogrowth; GUI truncate path end to end.
+
 ## [1.17.0.0] — 2026-10-07
 
 ### Remove partitioning from a table (`Remove-sqmTablePartitioning`)

@@ -37,8 +37,10 @@ mit den Kopierroutinen von [sqmDataTransfer](https://github.com/JankeUwe/sqmData
 - Partitionierung einer Tabelle vollstaendig wieder entfernen
   (`Remove-sqmTablePartitioning`) — alle Indizes zurueck auf eine Filegroup,
   Partition Scheme/Function droppen, optional die leeren Filegroups samt Dateien
-  entfernen, Wartungsregistrierung loeschen. In der GUI ueber *Remove partitioning...*
-  in der Tabellenauswahl.
+  entfernen, Wartungsregistrierung loeschen. Vorher Platzpruefung der Ziel-Filegroup.
+  Mit `-TruncateData` fuer bereits archivierte Tabellen (`<X>_Original` nach dem
+  Cutover): erst leeren (nach Abgleich mit der Archiv-Tabelle), dann entpartitionieren.
+  In der GUI ueber *Remove partitioning...* in der Tabellenauswahl.
 - WinForms-GUI-Assistent (`Show-sqmPartitionToolGui`) und vollständige CLI
   (alle Kernfunktionen sind eigenständig aus der PowerShell-Konsole nutzbar).
 

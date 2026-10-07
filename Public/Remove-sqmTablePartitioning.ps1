@@ -52,7 +52,26 @@
 
     Jeder Index wird dabei einmal komplett neu geschrieben (Dauer und Transaktionsprotokoll wie
     bei einem Index-Rebuild); bei Heaps mit Nonclustered-Indizes werden diese durch den
-    temporaeren Clustered Index zusaetzlich zweimal neu aufgebaut.
+    temporaeren Clustered Index zusaetzlich zweimal neu aufgebaut. Vor jeder Aenderung wird
+    geprueft, ob Tabelle und Indizes in die Ziel-Filegroup passen (freier Platz in den Dateien
+    plus moegliches Autogrowth bis zur Laufwerks- bzw. Dateigrenze, -SkipSpaceCheck).
+
+    -TruncateData: fuer Tabellen, deren Daten bereits vollstaendig in einer Archiv-Datenbank
+    liegen (typisch: die nach dem Cutover von Invoke-sqmTableArchiveMigration verbliebene
+    '<Tabelle>_Original'). Die Tabelle wird vor dem Umbau per TRUNCATE TABLE geleert, der Umbau
+    selbst ist dann eine Sache von Sekunden, und die Filegroups werden frei. Vorher (ohne Kosten,
+    nur Metadaten) geprueft:
+    - die Archiv-Tabelle (-ArchiveTable, bei '<X>_Original' automatisch aus der View '<X>'
+      abgeleitet) existiert, ist nicht die Tabelle selbst und hat mindestens so viele Zeilen wie
+      die zu leerende Tabelle (-SkipArchiveCheck schaltet das ab);
+    - kein Fremdschluessel einer anderen Tabelle, keine indizierte View, keine Replikation und
+      kein CDC auf der Tabelle (TRUNCATE wuerde daran scheitern).
+    Zusaetzlich zur normalen Bestaetigung fragt die Funktion vor dem TRUNCATE noch einmal
+    gesondert nach; diese Rueckfrage schaltet nur -Force ab (nicht -Confirm:$false).
+
+    Registry: geloescht wird der Eintrag der Tabelle selbst und jeder weitere Eintrag derselben
+    Datenbank, der auf ein jetzt entferntes Partition Scheme zeigt (nach einem Cutover steht er
+    unter dem Namen der View, nicht unter '<Tabelle>_Original').
 
 .PARAMETER SqlInstance
     Ziel-Instanz.
@@ -74,16 +93,31 @@
     anderen Editionen automatisch mit Warnung auf OFFLINE zurueck. Columnstore-Indizes werden
     immer offline neu aufgebaut.
 .PARAMETER KeepRegistration
-    Registry-Eintrag in master.dbo.sqm_PartitionRegistry nicht loeschen.
+    Registry-Eintraege in master.dbo.sqm_PartitionRegistry nicht loeschen.
+.PARAMETER TruncateData
+    Tabelle vor dem Entfernen der Partitionierung leeren (TRUNCATE TABLE). Nur fuer Tabellen,
+    deren Daten bereits in einer Archiv-Datenbank liegen, siehe DESCRIPTION.
+.PARAMETER ArchiveTable
+    Nur mit -TruncateData: Archiv-Tabelle als 'Datenbank.Schema.Tabelle' (gleiche Instanz), gegen
+    die die Zeilenzahl geprueft wird. Ohne Angabe bei '<X>_Original' aus der View '<X>' abgeleitet.
+.PARAMETER SkipArchiveCheck
+    Nur mit -TruncateData: Zeilenzahl-Pruefung gegen die Archiv-Tabelle auslassen.
+.PARAMETER Force
+    Nur mit -TruncateData: gesonderte Rueckfrage vor dem TRUNCATE unterdruecken (fuer
+    unbeaufsichtigte Laeufe).
+.PARAMETER SkipSpaceCheck
+    Platzpruefung der Ziel-Filegroup auslassen.
 .PARAMETER SqlCredential
     Optionales PSCredential.
 .PARAMETER EnableException
     Fehler sofort als Ausnahme ausloesen.
 
 .OUTPUTS
-    PSCustomObject mit Status (Success | NotPartitioned | WhatIf), TargetFilegroup,
+    PSCustomObject mit Status (Success | NotPartitioned | WhatIf | Cancelled), TargetFilegroup,
     IndexesMoved, DroppedPartitionSchemes, DroppedPartitionFunctions, RemovedFilegroups,
-    Unregistered, Warnings und Statements (die ausgefuehrte bzw. bei -WhatIf geplante DDL).
+    Unregistered, UnregisteredTables, Truncated, RowsTruncated, ArchiveTable, ArchiveRows,
+    SpaceNeededMB, SpaceAvailableMB, Warnings und Statements (die ausgefuehrte bzw. bei -WhatIf
+    geplante DDL).
 
 .EXAMPLE
     Remove-sqmTablePartitioning -SqlInstance "SQL01" -Database "Sales" -Schema "dbo" -Table "OrderHistory" -WhatIf
@@ -93,6 +127,12 @@
 .EXAMPLE
     Remove-sqmTablePartitioning -SqlInstance "SQL01" -Database "Sales" -Schema "dbo" -Table "OrderHistory" `
         -TargetFilegroup "PRIMARY" -RemoveEmptyFilegroups -Confirm:$false
+
+.EXAMPLE
+    # Nach dem Cutover einer Archiv-Migration: die umbenannte Quelle leeren, entpartitionieren und
+    # die Filegroups freigeben. Archiv-Tabelle wird aus der View 'OrderHistory' abgeleitet.
+    Remove-sqmTablePartitioning -SqlInstance "SQL01" -Database "Sales" -Schema "dbo" -Table "OrderHistory_Original" `
+        -TruncateData -RemoveEmptyFilegroups
 
 .NOTES
     Benoetigt: dbatools, Invoke-sqmLogging (sqmSQLTool).
@@ -127,6 +167,21 @@ function Remove-sqmTablePartitioning
 		[switch]$KeepRegistration,
 
 		[Parameter(Mandatory = $false)]
+		[switch]$TruncateData,
+
+		[Parameter(Mandatory = $false)]
+		[string]$ArchiveTable,
+
+		[Parameter(Mandatory = $false)]
+		[switch]$SkipArchiveCheck,
+
+		[Parameter(Mandatory = $false)]
+		[switch]$Force,
+
+		[Parameter(Mandatory = $false)]
+		[switch]$SkipSpaceCheck,
+
+		[Parameter(Mandatory = $false)]
 		[System.Management.Automation.PSCredential]$SqlCredential,
 
 		[Parameter(Mandatory = $false)]
@@ -143,6 +198,31 @@ function Remove-sqmTablePartitioning
 		param ([string]$Text)
 		$warnings.Add($Text)
 		Invoke-sqmLogging -Message $Text -FunctionName $functionName -Level "WARNING"
+	}
+	# Gemeinsames Rueckgabeobjekt, die Schritte fuellen es nach und nach.
+	$result = [PSCustomObject]@{
+		SchemaName                = $Schema
+		TableName                 = $Table
+		TargetFilegroup           = $TargetFilegroup
+		Status                    = $null
+		IndexesMoved              = @()
+		DroppedPartitionSchemes   = @()
+		DroppedPartitionFunctions = @()
+		RemovedFilegroups         = @()
+		Unregistered              = $false
+		UnregisteredTables        = @()
+		Truncated                 = $false
+		RowsTruncated             = [int64]0
+		ArchiveTable              = $null
+		ArchiveRows               = $null
+		SpaceNeededMB             = $null
+		SpaceAvailableMB          = $null
+		Warnings                  = @()
+		Statements                = @()
+	}
+	if (-not $TruncateData -and ($ArchiveTable -or $SkipArchiveCheck -or $Force))
+	{
+		Invoke-sqmLogging -Message "-ArchiveTable/-SkipArchiveCheck/-Force wirken nur zusammen mit -TruncateData und werden ignoriert." -FunctionName $functionName -Level "WARNING"
 	}
 
 	try
@@ -188,6 +268,7 @@ ORDER BY i.index_id;
 		$targetFg = Invoke-DbaQuery @connParams -Query "SELECT data_space_id, type FROM sys.filegroups WHERE name = N'$fgLiteral';" -ErrorAction Stop -EnableException -As PSObject
 		if (-not $targetFg) { throw "Filegroup '$TargetFilegroup' existiert nicht in Datenbank '$Database'." }
 		if ($targetFg.type -ne 'FG') { throw "Filegroup '$TargetFilegroup' ist keine Rowstore-Filegroup (Typ $($targetFg.type))." }
+		$result.TargetFilegroup = $TargetFilegroup
 
 		# Partition Schemes, die die Tabelle verwendet (Indizes + LOB-Daten). Ist die Tabelle schon
 		# unpartitioniert (Wiederholung nach Abbruch), aus dem Registry-Eintrag.
@@ -217,11 +298,134 @@ IF OBJECT_ID(N'master.dbo.sqm_PartitionRegistry') IS NOT NULL
 		$leftoverTmp = $base -and [int]$base.index_id -eq 1 -and $base.IndexName -eq $tmpIndexName
 		if ($schemeIds.Count -eq 0 -and -not $leftoverTmp -and -not $registryRow)
 		{
-			Invoke-sqmLogging -Message "'$Schema.$Table' ist nicht partitioniert - nichts zu tun." -FunctionName $functionName -Level "INFO"
-			return [PSCustomObject]@{
-				SchemaName = $Schema; TableName = $Table; TargetFilegroup = $TargetFilegroup; Status = 'NotPartitioned'
-				IndexesMoved = @(); DroppedPartitionSchemes = @(); DroppedPartitionFunctions = @(); RemovedFilegroups = @()
-				Unregistered = $false; Warnings = @(); Statements = @()
+			Invoke-sqmLogging -Message "'$Schema.$Table' ist nicht partitioniert - nichts zu tun$(if ($TruncateData) { ' (auch kein TRUNCATE)' })." -FunctionName $functionName -Level "INFO"
+			$result.Status = 'NotPartitioned'
+			return $result
+		}
+
+		# Zeilen und belegter Platz der Tabelle (alle Indizes, inkl. LOB) - nur Metadaten.
+		$sizeRow = Invoke-DbaQuery @connParams -Query "SELECT (SELECT ISNULL(SUM(p.rows), 0) FROM sys.partitions p WHERE p.object_id = OBJECT_ID(N'$objName') AND p.index_id IN (0, 1)) AS TableRows, (SELECT ISNULL(SUM(ps.reserved_page_count), 0) FROM sys.dm_db_partition_stats ps WHERE ps.object_id = OBJECT_ID(N'$objName')) AS ReservedPages;" -ErrorAction Stop -EnableException -As PSObject
+		$tableRows = [int64]$sizeRow.TableRows
+		$neededBytes = [int64]$sizeRow.ReservedPages * 8192
+
+		# =========================================================================================
+		# 1b. -TruncateData: Archiv und TRUNCATE-Hindernisse pruefen (nur Metadaten, kein Scan)
+		# =========================================================================================
+		if ($TruncateData)
+		{
+			$blockers = [System.Collections.Generic.List[string]]::new()
+			$fkIn = @(Invoke-DbaQuery @connParams -Query "SELECT fk.name AS ForeignKeyName, OBJECT_SCHEMA_NAME(fk.parent_object_id) + '.' + OBJECT_NAME(fk.parent_object_id) AS ReferencingTable FROM sys.foreign_keys fk WHERE fk.referenced_object_id = OBJECT_ID(N'$objName') AND fk.parent_object_id <> fk.referenced_object_id;" -ErrorAction Stop -EnableException -As PSObject)
+			if ($fkIn.Count -gt 0) { $blockers.Add("Fremdschluessel verweisen auf die Tabelle: $(($fkIn | ForEach-Object { "$($_.ReferencingTable) ($($_.ForeignKeyName))" }) -join '; ')") }
+			$ixViews = @(Invoke-DbaQuery @connParams -Query "SELECT DISTINCT OBJECT_SCHEMA_NAME(d.referencing_id) + '.' + OBJECT_NAME(d.referencing_id) AS ViewName FROM sys.sql_expression_dependencies d JOIN sys.indexes i ON i.object_id = d.referencing_id WHERE d.referenced_id = OBJECT_ID(N'$objName') AND d.is_schema_bound_reference = 1;" -ErrorAction Stop -EnableException -As PSObject)
+			if ($ixViews.Count -gt 0) { $blockers.Add("indizierte View(s) auf der Tabelle: $(($ixViews | ForEach-Object { $_.ViewName }) -join ', ')") }
+			$repl = Invoke-DbaQuery @connParams -Query "SELECT is_replicated, is_tracked_by_cdc FROM sys.tables WHERE object_id = OBJECT_ID(N'$objName');" -ErrorAction Stop -EnableException -As PSObject
+			if ([bool]$repl.is_replicated) { $blockers.Add('die Tabelle wird repliziert') }
+			if ([bool]$repl.is_tracked_by_cdc) { $blockers.Add('Change Data Capture ist fuer die Tabelle aktiv') }
+			if ($blockers.Count -gt 0) { throw "-TruncateData nicht moeglich, TRUNCATE TABLE wuerde scheitern: $($blockers -join ' | ')." }
+
+			if (-not $SkipArchiveCheck)
+			{
+				if (-not $ArchiveTable)
+				{
+					# Cutover-Konvention von Invoke-sqmTableArchiveMigration: Quelle -> '<X>_Original',
+					# unter '<X>' eine View auf die Archiv-Tabelle in einer anderen Datenbank.
+					if ($Table -notmatch '^(.+)_Original$') { throw "-TruncateData: Archiv-Tabelle nicht ableitbar ('$Table' endet nicht auf '_Original'). Mit -ArchiveTable 'Datenbank.Schema.Tabelle' angeben oder -SkipArchiveCheck." }
+					$viewName = $Matches[1]
+					$refs = @(Invoke-DbaQuery @connParams -Query "SELECT DISTINCT d.referenced_database_name AS Db, ISNULL(d.referenced_schema_name, 'dbo') AS Sch, d.referenced_entity_name AS Tab FROM sys.sql_expression_dependencies d WHERE d.referencing_id = OBJECT_ID(N'[$Schema].[$($viewName -replace "'", "''")]') AND OBJECTPROPERTY(d.referencing_id, 'IsView') = 1;" -ErrorAction Stop -EnableException -As PSObject)
+					$extRefs = @($refs | Where-Object { $_.Db -and $_.Db -ne $Database })
+					if ($extRefs.Count -ne 1) { throw "-TruncateData: Archiv-Tabelle nicht ableitbar - die View '$Schema.$viewName' $(if ($refs.Count -eq 0) { 'existiert nicht oder hat keine Abhaengigkeiten' } else { "verweist auf $($extRefs.Count) Tabellen anderer Datenbanken" }). Mit -ArchiveTable 'Datenbank.Schema.Tabelle' angeben." }
+					$archDb = [string]$extRefs[0].Db; $archSchema = [string]$extRefs[0].Sch; $archTab = [string]$extRefs[0].Tab
+					Invoke-sqmLogging -Message "Archiv-Tabelle aus der View '$Schema.$viewName' abgeleitet: $archDb.$archSchema.$archTab." -FunctionName $functionName -Level "INFO"
+				}
+				else
+				{
+					$parts = @($ArchiveTable -split '\.' | ForEach-Object { $_.Trim().Trim('[', ']') })
+					if ($parts.Count -ne 3) { throw "-ArchiveTable '$ArchiveTable': erwartet 'Datenbank.Schema.Tabelle'." }
+					$archDb, $archSchema, $archTab = $parts
+				}
+				if ($archDb -eq $Database -and $archSchema -eq $Schema -and $archTab -eq $Table) { throw "-ArchiveTable ist die zu leerende Tabelle selbst." }
+
+				$archDbQ = "[$($archDb -replace '\]', ']]')]"
+				$archObj = "[$archDb].[$archSchema].[$archTab]" -replace "'", "''"
+				$archRow = Invoke-DbaQuery @connParams -Query "SELECT OBJECT_ID(N'$archObj', 'U') AS ObjId, (SELECT SUM(p.rows) FROM $archDbQ.sys.partitions p WHERE p.object_id = OBJECT_ID(N'$archObj', 'U') AND p.index_id IN (0, 1)) AS ArchiveRows;" -ErrorAction Stop -EnableException -As PSObject
+				if ($archRow.ObjId -is [DBNull] -or $null -eq $archRow.ObjId) { throw "-TruncateData: Archiv-Tabelle '$archDb.$archSchema.$archTab' nicht gefunden." }
+				$archRows = [int64]$archRow.ArchiveRows
+				$result.ArchiveTable = "$archDb.$archSchema.$archTab"
+				$result.ArchiveRows = $archRows
+				if ($archRows -lt $tableRows)
+				{
+					throw "-TruncateData abgebrochen: die Archiv-Tabelle '$archDb.$archSchema.$archTab' hat $archRows Zeilen, '$Schema.$Table' aber $tableRows - die Daten sind nicht vollstaendig archiviert."
+				}
+				Invoke-sqmLogging -Message "Archiv-Pruefung bestanden: '$archDb.$archSchema.$archTab' $archRows Zeilen >= '$Schema.$Table' $tableRows Zeilen (Metadaten aus sys.partitions)." -FunctionName $functionName -Level "INFO"
+			}
+			else
+			{
+				& $addWarning "-SkipArchiveCheck: '$Schema.$Table' ($tableRows Zeilen) wird ohne Abgleich mit einer Archiv-Tabelle geleert."
+			}
+		}
+		elseif (-not $SkipSpaceCheck)
+		{
+			# =====================================================================================
+			# 1c. Platzpruefung Ziel-Filegroup: freier Platz in den Dateien + moegliches Autogrowth
+			# =====================================================================================
+			$fileQuery = @"
+SELECT f.file_id, f.name, CAST(f.size AS BIGINT) * 8192 AS SizeBytes,
+       CAST(FILEPROPERTY(f.name, 'SpaceUsed') AS BIGINT) * 8192 AS UsedBytes,
+       f.growth, f.max_size
+FROM sys.database_files f
+WHERE f.data_space_id = $([int]$targetFg.data_space_id) AND f.state = 0;
+"@
+			$files = @(Invoke-DbaQuery @connParams -Query $fileQuery -ErrorAction Stop -EnableException -As PSObject)
+			$freeInside = [int64]0
+			$growPerVolume = @{}
+			$volumeFree = @{}
+			$volumesKnown = $true
+			foreach ($f in $files)
+			{
+				$freeInside += [int64]$f.SizeBytes - [int64]$f.UsedBytes
+				if ([int]$f.growth -eq 0) { continue }
+				$maxGrow = if ([int]$f.max_size -eq -1 -or [int64]$f.max_size -ge 268435456) { [int64]::MaxValue } else { [int64]$f.max_size * 8192 - [int64]$f.SizeBytes }
+				try
+				{
+					$vol = Invoke-DbaQuery @connParams -Query "SELECT volume_mount_point, available_bytes FROM sys.dm_os_volume_stats(DB_ID(), $([int]$f.file_id));" -ErrorAction Stop -EnableException -As PSObject
+					$key = [string]$vol.volume_mount_point
+					$volumeFree[$key] = [int64]$vol.available_bytes
+					$cur = if ($growPerVolume.ContainsKey($key)) { $growPerVolume[$key] } else { [int64]0 }
+					$growPerVolume[$key] = [Math]::Min([decimal]$cur + [decimal]$maxGrow, [decimal][int64]::MaxValue)
+				}
+				catch { $volumesKnown = $false }
+			}
+			$growable = [int64]0
+			foreach ($k in $growPerVolume.Keys) { $growable += [int64][Math]::Min([decimal]$growPerVolume[$k], [decimal]$volumeFree[$k]) }
+			$available = $freeInside + $growable
+			$result.SpaceNeededMB = [Math]::Round($neededBytes / 1MB, 0)
+			$result.SpaceAvailableMB = [Math]::Round($available / 1MB, 0)
+
+			if (-not $volumesKnown)
+			{
+				& $addWarning "Platzpruefung: freier Laufwerksplatz nicht ermittelbar (sys.dm_os_volume_stats, braucht VIEW SERVER STATE) - nur der freie Platz in den Dateien von '$TargetFilegroup' wurde beruecksichtigt."
+			}
+			if ($available -lt $neededBytes)
+			{
+				throw "Platzpruefung: '$Schema.$Table' belegt $($result.SpaceNeededMB) MB, in Filegroup '$TargetFilegroup' sind aber nur $($result.SpaceAvailableMB) MB verfuegbar (frei in den Dateien + moegliches Autogrowth). Platz schaffen, eine andere -TargetFilegroup waehlen, oder wenn die Daten archiviert sind -TruncateData. Pruefung abschaltbar mit -SkipSpaceCheck."
+			}
+			if ($available -lt [int64]($neededBytes * 1.2))
+			{
+				& $addWarning "Platzpruefung: knapp - '$Schema.$Table' belegt $($result.SpaceNeededMB) MB, in '$TargetFilegroup' sind $($result.SpaceAvailableMB) MB verfuegbar. Der Index-Neuaufbau braucht zusaetzlich Sortierplatz."
+			}
+			elseif ($freeInside -lt $neededBytes)
+			{
+				& $addWarning "Platzpruefung: die Dateien von '$TargetFilegroup' muessen per Autogrowth um ca. $([Math]::Round(($neededBytes - $freeInside) / 1MB, 0)) MB wachsen."
+			}
+			else
+			{
+				Invoke-sqmLogging -Message "Platzpruefung: '$Schema.$Table' belegt $($result.SpaceNeededMB) MB, in '$TargetFilegroup' frei: $([Math]::Round($freeInside / 1MB, 0)) MB." -FunctionName $functionName -Level "INFO"
+			}
+
+			$recovery = Invoke-DbaQuery @connParams -Query "SELECT recovery_model_desc FROM sys.databases WHERE database_id = DB_ID();" -ErrorAction Stop -EnableException -As PSObject
+			if ($recovery.recovery_model_desc -eq 'FULL' -and $neededBytes -gt 1GB)
+			{
+				& $addWarning "Recovery-Modell FULL: der Index-Neuaufbau protokolliert vollstaendig, das Transaktionsprotokoll braucht ca. $($result.SpaceNeededMB) MB (Protokollsicherungen waehrend des Laufs einplanen)."
 			}
 		}
 
@@ -437,14 +641,36 @@ GROUP BY p.index_id, p.data_compression_desc;
 			$schemeFilegroups = @(Invoke-DbaQuery @connParams -Query "SELECT DISTINCT fg.data_space_id, fg.name AS FilegroupName FROM sys.destination_data_spaces dds JOIN sys.filegroups fg ON fg.data_space_id = dds.data_space_id WHERE dds.partition_scheme_id IN ($idList);" -ErrorAction Stop -EnableException -As PSObject)
 		}
 
-		$applyAction = "Partitionierung von '$Schema.$Table' entfernen ($($movedIndexes.Count) Index/Indizes auf '$TargetFilegroup', Scheme(s): $(($schemeInfo | ForEach-Object { $_.SchemeName }) -join ', '))"
+		if ($TruncateData)
+		{
+			$statements.Insert(0, [PSCustomObject]@{ Step = "TRUNCATE TABLE '$Schema.$Table' ($tableRows Zeilen)"; Sql = "TRUNCATE TABLE [$Schema].[$Table];" })
+		}
+		$result.IndexesMoved = @($movedIndexes)
+		$result.Statements = @($statements | ForEach-Object { $_.Sql })
+
+		$applyAction = "$(if ($TruncateData) { "'$Schema.$Table' LEEREN ($tableRows Zeilen) und " })Partitionierung von '$Schema.$Table' entfernen ($($movedIndexes.Count) Index/Indizes auf '$TargetFilegroup', Scheme(s): $(($schemeInfo | ForEach-Object { $_.SchemeName }) -join ', '))"
 		if (-not $PSCmdlet.ShouldProcess($Database, $applyAction))
 		{
-			return [PSCustomObject]@{
-				SchemaName = $Schema; TableName = $Table; TargetFilegroup = $TargetFilegroup; Status = 'WhatIf'
-				IndexesMoved = @($movedIndexes); DroppedPartitionSchemes = @($schemeInfo | ForEach-Object { $_.SchemeName })
-				DroppedPartitionFunctions = @($schemeInfo | ForEach-Object { $_.FunctionName } | Select-Object -Unique)
-				RemovedFilegroups = @(); Unregistered = $false; Warnings = @($warnings); Statements = @($statements | ForEach-Object { $_.Sql })
+			$result.Status = 'WhatIf'
+			$result.DroppedPartitionSchemes = @($schemeInfo | ForEach-Object { $_.SchemeName })
+			$result.DroppedPartitionFunctions = @($schemeInfo | ForEach-Object { $_.FunctionName } | Select-Object -Unique)
+			$result.Warnings = @($warnings)
+			return $result
+		}
+
+		# TRUNCATE ist nicht rueckgaengig zu machen: eigene Rueckfrage, die -Confirm:$false NICHT
+		# abschaltet, nur -Force.
+		if ($TruncateData -and -not $Force)
+		{
+			$archInfo = if ($result.ArchiveTable) { "Archiv '$($result.ArchiveTable)': $($result.ArchiveRows) Zeilen." } else { 'OHNE Abgleich mit einem Archiv (-SkipArchiveCheck).' }
+			try { $continue = $PSCmdlet.ShouldContinue("Alle $tableRows Zeilen von '$Database.$Schema.$Table' werden endgueltig geloescht (TRUNCATE TABLE). $archInfo Fortfahren?", 'TRUNCATE TABLE') }
+			catch { throw "-TruncateData: die Rueckfrage vor dem TRUNCATE ist in dieser Sitzung nicht moeglich (nicht interaktiv, z.B. Agent-Job). Nichts geaendert. Fuer unbeaufsichtigte Laeufe -Force angeben." }
+			if (-not $continue)
+			{
+				Invoke-sqmLogging -Message "TRUNCATE von '$Schema.$Table' nicht bestaetigt - abgebrochen, nichts geaendert." -FunctionName $functionName -Level "WARNING"
+				$result.Status = 'Cancelled'
+				$result.Warnings = @($warnings)
+				return $result
 			}
 		}
 
@@ -470,6 +696,12 @@ GROUP BY p.index_id, p.data_compression_desc;
 					$msg += " ACHTUNG: entfernte Indizes manuell neu anlegen: $($pendingRecreate.Values -join ' ')"
 				}
 				throw $msg
+			}
+			if ($TruncateData -and $st.Sql -like 'TRUNCATE TABLE*')
+			{
+				$result.Truncated = $true
+				$result.RowsTruncated = $tableRows
+				Invoke-sqmLogging -Message "'$Schema.$Table' geleert ($tableRows Zeilen)." -FunctionName $functionName -Level "WARNING"
 			}
 			if ($st.PSObject.Properties['DropsIndex']) { $pendingRecreate[$st.DropsIndex] = $st.RecreateSql }
 			if ($st.PSObject.Properties['RecreatesIndex']) { $pendingRecreate.Remove($st.RecreatesIndex) }
@@ -582,21 +814,41 @@ SELECT
 			& $addWarning "Registry-Eintrag fuer '$Schema.$Table' bleibt bestehen (-KeepRegistration) - die Wartungs-Jobs werden fuer diese Tabelle fehlschlagen, bis er entfernt ist."
 		}
 
+		# Weitere Eintraege derselben Datenbank, die auf ein jetzt entferntes Scheme zeigen (nach einem
+		# Cutover steht der Eintrag unter dem View-Namen, nicht unter '<Tabelle>_Original').
+		$unregisteredTables = [System.Collections.Generic.List[string]]::new()
+		if ($unregistered) { $unregisteredTables.Add("$Schema.$Table") }
+		if ($droppedSchemes.Count -gt 0)
+		{
+			$schemeList = ($droppedSchemes | ForEach-Object { "N'$($_ -replace "'", "''")'" }) -join ', '
+			$dbLit = $Database -replace "'", "''"
+			$staleQuery = "IF OBJECT_ID(N'master.dbo.sqm_PartitionRegistry') IS NOT NULL SELECT SchemaName, TableName FROM master.dbo.sqm_PartitionRegistry WHERE DatabaseName = N'$dbLit' AND PartitionSchemeName IN ($schemeList) AND NOT (SchemaName = N'$($Schema -replace "'", "''")' AND TableName = N'$($Table -replace "'", "''")');"
+			$stale = @(Invoke-DbaQuery @connParams -Query $staleQuery -ErrorAction Stop -EnableException -As PSObject)
+			foreach ($sr in $stale)
+			{
+				if ($KeepRegistration)
+				{
+					& $addWarning "Registry-Eintrag '$($sr.SchemaName).$($sr.TableName)' zeigt auf ein entferntes Partition Scheme und bleibt bestehen (-KeepRegistration)."
+					continue
+				}
+				$srParams = @{ SqlInstance = $SqlInstance; DatabaseName = $Database; SchemaName = [string]$sr.SchemaName; TableName = [string]$sr.TableName; Purge = $true }
+				if ($SqlCredential) { $srParams['SqlCredential'] = $SqlCredential }
+				Remove-sqmPartitionRegistration @srParams -Confirm:$false | Out-Null
+				$unregisteredTables.Add("$($sr.SchemaName).$($sr.TableName)")
+				Invoke-sqmLogging -Message "Registry-Eintrag '$($sr.SchemaName).$($sr.TableName)' entfernt (zeigte auf ein entferntes Partition Scheme)." -FunctionName $functionName -Level "INFO"
+			}
+		}
+
 		Invoke-sqmLogging -Message "$applyAction - erfolgreich." -FunctionName $functionName -Level "INFO"
 
-		return [PSCustomObject]@{
-			SchemaName                = $Schema
-			TableName                 = $Table
-			TargetFilegroup           = $TargetFilegroup
-			Status                    = 'Success'
-			IndexesMoved              = @($movedIndexes)
-			DroppedPartitionSchemes   = @($droppedSchemes)
-			DroppedPartitionFunctions = @($droppedFunctions)
-			RemovedFilegroups         = @($removedFilegroups)
-			Unregistered              = $unregistered
-			Warnings                  = @($warnings)
-			Statements                = @($statements | ForEach-Object { $_.Sql })
-		}
+		$result.Status = 'Success'
+		$result.DroppedPartitionSchemes = @($droppedSchemes)
+		$result.DroppedPartitionFunctions = @($droppedFunctions)
+		$result.RemovedFilegroups = @($removedFilegroups)
+		$result.Unregistered = $unregistered
+		$result.UnregisteredTables = @($unregisteredTables)
+		$result.Warnings = @($warnings)
+		return $result
 	}
 	catch
 	{

@@ -447,7 +447,7 @@
 
         $dlg = New-Object System.Windows.Forms.Form
         $dlg.Text = "Remove partitioning - $uSchema.$uTable"
-        $dlg.Size = New-Object System.Drawing.Size(560, 290)
+        $dlg.Size = New-Object System.Drawing.Size(560, 400)
         $dlg.StartPosition = 'CenterParent'
         $dlg.FormBorderStyle = 'FixedDialog'
         $dlg.MaximizeBox = $false
@@ -483,21 +483,46 @@
         $chkUOnline.Text = 'ONLINE index operations (Enterprise/Developer only, otherwise offline)'
         $chkUOnline.Location = New-Object System.Drawing.Point(12, 132)
         $chkUOnline.Size = New-Object System.Drawing.Size(530, 22)
+        # Nach dem Cutover einer Archiv-Migration ('<X>_Original'): Daten liegen schon im Archiv,
+        # Tabelle vorher leeren statt Terabytes umzukopieren. Nie vorbelegt.
+        $chkUTrunc = New-Object System.Windows.Forms.CheckBox
+        $chkUTrunc.Text = 'Delete ALL data first (TRUNCATE) - the data is already in an archive database'
+        $chkUTrunc.Location = New-Object System.Drawing.Point(12, 166)
+        $chkUTrunc.Size = New-Object System.Drawing.Size(530, 22)
+        $chkUTrunc.ForeColor = $cWarn
+        $lblUArch = New-Object System.Windows.Forms.Label
+        $lblUArch.Text = 'Archive table (Db.Schema.Table):'
+        $lblUArch.Location = New-Object System.Drawing.Point(30, 198)
+        $lblUArch.AutoSize = $true
+        $lblUArch.ForeColor = $cDim
+        $txtUArch = New-Object System.Windows.Forms.TextBox
+        $txtUArch.Location = New-Object System.Drawing.Point(230, 194)
+        $txtUArch.Size = New-Object System.Drawing.Size(300, 24)
+        $txtUArch.BackColor = $cWindow
+        $txtUArch.ForeColor = $cText
+        $txtUArch.BorderStyle = 'FixedSingle'
+        $lblUArchInfo = New-Object System.Windows.Forms.Label
+        $lblUArchInfo.Text = "Empty = derived from the view '<X>' for a table named '<X>_Original' (archive cutover).`nThe archive must hold at least as many rows as this table, otherwise nothing is changed."
+        $lblUArchInfo.Location = New-Object System.Drawing.Point(30, 224)
+        $lblUArchInfo.Size = New-Object System.Drawing.Size(510, 34)
+        $lblUArchInfo.ForeColor = $cDim
+        foreach ($c in @($lblUArch, $txtUArch, $lblUArchInfo)) { $c.Enabled = $false }
+        $chkUTrunc.Add_CheckedChanged({ foreach ($c in @($lblUArch, $txtUArch, $lblUArchInfo)) { $c.Enabled = $chkUTrunc.Checked } })
         $btnUOk = New-Object System.Windows.Forms.Button
         $btnUOk.Text = 'Remove partitioning'
-        $btnUOk.Location = New-Object System.Drawing.Point(266, 200)
+        $btnUOk.Location = New-Object System.Drawing.Point(266, 312)
         $btnUOk.Size = New-Object System.Drawing.Size(160, 30)
         $btnUOk.DialogResult = 'OK'
         & $styleButton $btnUOk
         $btnUCancel = New-Object System.Windows.Forms.Button
         $btnUCancel.Text = 'Cancel'
-        $btnUCancel.Location = New-Object System.Drawing.Point(434, 200)
+        $btnUCancel.Location = New-Object System.Drawing.Point(434, 312)
         $btnUCancel.Size = New-Object System.Drawing.Size(100, 30)
         $btnUCancel.DialogResult = 'Cancel'
         & $styleButton $btnUCancel
         $dlg.AcceptButton = $btnUOk
         $dlg.CancelButton = $btnUCancel
-        foreach ($c in @($lblU1, $lblU2, $cmbU, $chkUFg, $chkUOnline, $btnUOk, $btnUCancel)) { $dlg.Controls.Add($c) }
+        foreach ($c in @($lblU1, $lblU2, $cmbU, $chkUFg, $chkUOnline, $chkUTrunc, $lblUArch, $txtUArch, $lblUArchInfo, $btnUOk, $btnUCancel)) { $dlg.Controls.Add($c) }
 
         if ($dlg.ShowDialog($form) -ne 'OK') { return }
 
@@ -511,6 +536,17 @@
             Online                = $chkUOnline.Checked
         }
         if ($cp.ContainsKey('SqlCredential')) { $uParams['SqlCredential'] = $cp['SqlCredential'] }
+        if ($chkUTrunc.Checked)
+        {
+            # Eigene, unmissverstaendliche Rueckfrage - danach -Force, weil die Funktion im
+            # GUI-Kontext keine Konsolen-Rueckfrage stellen kann. Archiv-Pruefung laeuft trotzdem.
+            $rowCount = $r.Cells['Zeilen'].Value
+            $ans = [System.Windows.Forms.MessageBox]::Show("ALL $rowCount rows of '$($script:wiz.Database).$uSchema.$uTable' will be deleted permanently (TRUNCATE TABLE) before the partitioning is removed.`n`nThe row count of the archive table is checked first; if it is lower, nothing is changed.`n`nContinue?", 'Delete all data', 'YesNo', 'Warning', 'Button2')
+            if ($ans -ne 'Yes') { Set-Status 'Cancelled, nothing changed.' 'Info'; return }
+            $uParams['TruncateData'] = $true
+            $uParams['Force'] = $true
+            if ($txtUArch.Text.Trim()) { $uParams['ArchiveTable'] = $txtUArch.Text.Trim() }
+        }
 
         Set-Status "Removing partitioning of '$uSchema.$uTable' (rebuilding all indexes) ..." 'Info'
         $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
@@ -519,11 +555,12 @@
             $res = Remove-sqmTablePartitioning @uParams -Confirm:$false
             $form.Cursor = [System.Windows.Forms.Cursors]::Default
             $summary = "Partitioning of '$uSchema.$uTable' removed.`n`n" +
+                $(if ($res.Truncated) { "Data deleted: $($res.RowsTruncated) rows (archive '$($res.ArchiveTable)': $($res.ArchiveRows) rows)`n" } else { '' }) +
                 "Indexes moved to '$($res.TargetFilegroup)': $($res.IndexesMoved -join ', ')`n" +
                 "Dropped partition scheme(s): $(if ($res.DroppedPartitionSchemes) { $res.DroppedPartitionSchemes -join ', ' } else { '-' })`n" +
                 "Dropped partition function(s): $(if ($res.DroppedPartitionFunctions) { $res.DroppedPartitionFunctions -join ', ' } else { '-' })`n" +
                 "Removed filegroup(s): $(if ($res.RemovedFilegroups) { $res.RemovedFilegroups -join ', ' } else { '-' })`n" +
-                "Maintenance registration removed: $(if ($res.Unregistered) { 'yes' } else { 'no (was not registered)' })"
+                "Maintenance registration removed: $(if ($res.UnregisteredTables) { $res.UnregisteredTables -join ', ' } else { 'none (was not registered)' })"
             if ($res.Warnings.Count -gt 0) { $summary += "`n`nWarnings:`n- $($res.Warnings -join "`n- ")" }
             [void][System.Windows.Forms.MessageBox]::Show($summary, 'Remove partitioning', 'OK', $(if ($res.Warnings.Count -gt 0) { 'Warning' } else { 'Information' }))
             Load-Step1

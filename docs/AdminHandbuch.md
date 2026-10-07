@@ -8,7 +8,7 @@ Zielgruppe dieses Handbuchs: SQL-Server-DBAs, die das Tool operativ einsetzen (n
 Entwicklung des Moduls selbst). Fuer die Versionshistorie siehe [CHANGELOG.md](../CHANGELOG.md),
 fuer eine Kurzuebersicht [README.md](../README.md).
 
-Stand: 2026-10-07, sqmPartitionTool 1.17.0.0 (mit sqmDataTransfer 0.1.23.0).
+Stand: 2026-10-07, sqmPartitionTool 1.18.0.0 (mit sqmDataTransfer 0.1.23.0).
 
 ---
 
@@ -425,6 +425,12 @@ bleiben unveraendert, nur ihr Speicherort aendert sich.
    - **Pre-Flight ohne Aenderung:** Tabelle vorhanden, keine Memory-Optimized-Tabelle, keine
      XML-/Spatial-Indizes (vorher entfernen), Ziel-Filegroup vorhanden. Ohne `-TargetFilegroup`
      wird die Standard-Filegroup der Datenbank verwendet (meist PRIMARY).
+   - **Platzpruefung:** die Daten ziehen physisch auf die Ziel-Filegroup um. Vorher wird
+     geprueft, ob die Tabelle mit allen Indizes (belegte Seiten) dort hineinpasst: freier Platz
+     in den Dateien plus moegliches Autogrowth bis zur Grenze des Laufwerks bzw. der Datei. Reicht
+     es nicht, bricht die Funktion mit den Zahlen ab. Unter 20 % Reserve (Sortierplatz des
+     Neuaufbaus) oder wenn Autogrowth noetig ist: Warnung. Im FULL-Recovery-Modell zusaetzlich
+     ein Hinweis auf das Protokollvolumen. `-SkipSpaceCheck` schaltet die Pruefung ab.
    - **Clustered Index / PRIMARY KEY / UNIQUE-Constraint und jeder Nonclustered Index** werden
      per `CREATE ... WITH (DROP_EXISTING = ON) ON [<Filegroup>]` mit unveraenderter Definition neu
      aufgebaut: Schluessel, INCLUDE, Filter, Eindeutigkeit, Fuellfaktor, Sperroptionen und
@@ -457,6 +463,45 @@ bleiben unveraendert, nur ihr Speicherort aendert sich.
      Tabelle einen Columnstore Index, geht das nicht (Warnung, offline).
 3. **Ergebnis pruefen:** das Rueckgabeobjekt nennt verschobene Indizes, gedroppte Schemes,
    Functions und Filegroups sowie alle Warnungen. Ein erneuter Aufruf meldet `NotPartitioned`.
+
+### Archivierte Tabelle leeren und entpartitionieren (`-TruncateData`)
+
+Typischer Fall nach Ablaufplan C mit Cutover: die Daten liegen vollstaendig in der
+Archiv-Datenbank, die Quelle heisst jetzt `<X>_Original`, unter `<X>` liest eine View aus dem
+Archiv. Die alte Tabelle belegt aber weiter ihren Platz (z.B. 11 TB in den Partitions-Filegroups
+der OLTP-Datenbank). Sie umzukopieren waere sinnlos, sie wird geleert:
+
+```powershell
+# 1. Ansehen: Archiv-Abgleich, geplante DDL (TRUNCATE steht an erster Stelle)
+Remove-sqmTablePartitioning -SqlInstance "SQL01" -Database "Sales" -Schema "dbo" `
+    -Table "OrderHistory_Original" -TruncateData -RemoveEmptyFilegroups -WhatIf
+
+# 2. Ausfuehren (fragt vor dem TRUNCATE gesondert nach)
+Remove-sqmTablePartitioning -SqlInstance "SQL01" -Database "Sales" -Schema "dbo" `
+    -Table "OrderHistory_Original" -TruncateData -RemoveEmptyFilegroups
+```
+
+- **Archiv-Abgleich, vor jeder Aenderung und nur aus Metadaten** (kein Scan, auch bei
+  Terabytes ohne Last): die Archiv-Tabelle muss existieren, darf nicht die Tabelle selbst sein
+  und muss mindestens so viele Zeilen haben wie die zu leerende Tabelle (`sys.partitions`).
+  Ohne `-ArchiveTable 'Datenbank.Schema.Tabelle'` wird sie bei `<X>_Original` aus der View `<X>`
+  abgeleitet. `-SkipArchiveCheck` schaltet den Abgleich ab (nur wenn das Archiv woanders liegt).
+- **Blockiert**, wenn TRUNCATE scheitern wuerde: Fremdschluessel anderer Tabellen, indizierte
+  Views, Replikation, CDC.
+- **Doppelte Bestaetigung:** zusaetzlich zur normalen Rueckfrage fragt die Funktion vor dem
+  TRUNCATE gesondert nach. Diese Rueckfrage schaltet `-Confirm:$false` **nicht** ab, nur
+  `-Force` (z.B. im Agent-Job). Ohne `-Force` in einer nicht interaktiven Sitzung bricht die
+  Funktion ohne Aenderung ab.
+- **Registry:** nach dem Cutover steht der Eintrag unter dem View-Namen `<X>`. Entfernt wird jeder
+  Eintrag der Datenbank, der auf das gedroppte Partition Scheme zeigt (`UnregisteredTables`).
+- **Platz zurueckgewinnen:** `TRUNCATE` gibt grosse Tabellen im Hintergrund frei (deferred drop),
+  das kann bei Terabytes etwas dauern. Scheitert `-RemoveEmptyFilegroups` an einer noch nicht
+  leeren Datei oder im FULL-Recovery-Modell an der fehlenden Protokollsicherung, gibt es nur eine
+  Warnung: Protokollsicherung abwarten und den Aufruf ohne `-TruncateData` wiederholen, er raeumt
+  die restlichen Filegroups ab.
+
+In der GUI: *Remove partitioning...*, Option *Delete ALL data first (TRUNCATE)* (nie
+vorbelegt), optional die Archiv-Tabelle, danach eine eigene Warnabfrage.
 
 **Wiederholbar:** bricht ein Lauf ab, setzt ein erneuter Aufruf bei den noch partitionierten
 Indizes fort (auch ein zurueckgebliebener `sqmUnpartitionTmp` wird abgeraeumt). Ist die Tabelle
@@ -571,6 +616,12 @@ Ladepfad.
   jeweiligen Batches kurzzeitig die betroffenen Zeilen/Partitionen, der atomare Cutover die ganze
   Quelltabelle fuer die Dauer des letzten Abgleichs. Fuer produktive Systeme Wartungsfenster oder
   Zeiten mit geringer Last einplanen.
+- **Remove-sqmTablePartitioning: "Platzpruefung ... nur X MB verfuegbar"**: die Ziel-Filegroup
+  ist zu klein. Datei vergroessern/Autogrowth erlauben, andere `-TargetFilegroup`, oder bei
+  archivierten Daten `-TruncateData`.
+- **Remove-sqmTablePartitioning -TruncateData: "Archiv-Tabelle nicht ableitbar"**: die Tabelle
+  heisst nicht `<X>_Original` oder die View `<X>` fehlt. `-ArchiveTable 'Db.Schema.Tabelle'`
+  angeben.
 - **Remove-sqmTablePartitioning: "Nicht unterstuetzte Indextypen"**: XML- oder Spatial-Indizes
   vorher entfernen und danach neu anlegen.
 - **Remove-sqmTablePartitioning: Partition Scheme bleibt bestehen**: ein anderes Objekt verwendet
