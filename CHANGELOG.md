@@ -1,5 +1,25 @@
 ﻿# sqmPartitionTool — Changelog
 
+## [1.18.1.0] — 2026-10-17
+
+### Development: duplicate parameter binding check extended
+
+- `Tools/Test-DuplicateParameterBinding.ps1` (runs in the pre-push hook) now checks **every key** of a splatted
+  hashtable, not just common parameters. Trigger: sqmSQLTool 1.9.178.0 had
+  `$connParams = @{ SqlInstance; SqlCredential; Database }` plus `Invoke-DbaQuery @connParams -Database 'master'`,
+  which throws `ParameterAlreadyBound` under Windows PowerShell 5.1 while PowerShell 7 silently lets the explicit
+  value win.
+- Keys are tracked per function in text order up to the call: hashtable literals (also `[ordered]`),
+  `$p['X'] =`, `$p.X =`, `.Add()`, `+= @{}`, copies via `.Clone()` or assignment. `.Remove()` before the call,
+  an unconditional reassignment and `.Clear()` prevent false positives; assignments in an if branch do not
+  count for the else branch.
+- Abbreviations: common parameters via alias (`-ea`) and unique prefix; functions defined in the repository via
+  their `param()` block including `[Alias()]`. Foreign commands (dbatools) only by exact name, so `-Query` next
+  to `QueryTimeout` is no hit.
+- New switch `-PassThru`. 13 Pester tests in `tests/Test-DuplicateParameterBinding.Tests.ps1`, including a run
+  under `powershell.exe` 5.1 confirming the old pattern fails and the `.Clone()` fix works.
+- Run over this repository: no hits. No module code changed.
+
 ## [1.18.0.0] — 2026-10-07
 
 ### `Remove-sqmTablePartitioning -TruncateData`: empty an archived table, then unpartition it
