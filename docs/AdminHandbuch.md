@@ -8,7 +8,7 @@ Zielgruppe dieses Handbuchs: SQL-Server-DBAs, die das Tool operativ einsetzen (n
 Entwicklung des Moduls selbst). Fuer die Versionshistorie siehe [CHANGELOG.md](../CHANGELOG.md),
 fuer eine Kurzuebersicht [README.md](../README.md).
 
-Stand: 2026-11-05, sqmPartitionTool 1.19.0.0 (mit sqmDataTransfer 0.1.23.0).
+Stand: 2026-11-05, sqmPartitionTool 1.19.1.0 (mit sqmDataTransfer 0.1.23.0).
 
 ---
 
@@ -93,6 +93,8 @@ im Fenstertitel (Version und Ladepfad), per Konsole:
 Get-Module sqmPartitionTool, sqmDataTransfer -ListAvailable |
     Select-Object Name, Version, ModuleBase
 ```
+
+**Startmenue-Eintrag:** Die Installation legt den Eintrag `sqmPartitionTool` im Startmenue an (AllUsers: fuer alle Benutzer, CurrentUser: nur fuer den aktuellen Benutzer). Er startet die GUI ohne sichtbares Konsolenfenster. Das Anheften an Start ist unter Windows 10/11 nicht automatisierbar: einmalig per Rechtsklick auf den Eintrag > *An Start anheften*.
 
 Verbindung erfolgt wahlweise per Windows-Authentifizierung (Standard) oder SQL Server
 Authentifizierung (`-SqlCredential`, auch im GUI-Assistenten in Schritt 0 waehlbar).

@@ -1,5 +1,15 @@
 ﻿# sqmPartitionTool — Changelog
 
+## [1.19.1.0] — 2026-11-05
+
+### Start menu entry for the GUI
+
+- `Install.ps1` creates a Start menu entry `sqmPartitionTool` after a successful import test
+  (`Show-sqmPartitionToolGui`, no console window, own icon `Assets\sqmPartitionTool.ico`).
+  AllUsers: Start menu of all users, CurrentUser: the user's own Start menu. The other shortcut is
+  removed so no duplicate entry appears. Same pattern as sqmSQLTool, sqmOlaBackupBuilder and
+  sqmRobocopyGui.
+
 ## [1.19.0.0] — 2026-11-05
 
 ### AlwaysOn / availability groups

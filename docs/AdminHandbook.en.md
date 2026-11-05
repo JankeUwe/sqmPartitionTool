@@ -8,7 +8,7 @@ Audience: SQL Server DBAs who operate the tool (not the development of the modul
 version history see [CHANGELOG.md](../CHANGELOG.md), for a short overview see [README.md](../README.md).
 The German edition of this handbook is [AdminHandbuch.md](AdminHandbuch.md).
 
-As of: 2026-11-05, sqmPartitionTool 1.19.0.0 (with sqmDataTransfer 0.1.23.0).
+As of: 2026-11-05, sqmPartitionTool 1.19.1.0 (with sqmDataTransfer 0.1.23.0).
 
 ---
 
@@ -92,6 +92,8 @@ title (version and load path), from the console:
 Get-Module sqmPartitionTool, sqmDataTransfer -ListAvailable |
     Select-Object Name, Version, ModuleBase
 ```
+
+**Start menu entry:** the installation creates the entry `sqmPartitionTool` in the Start menu (AllUsers: for all users, CurrentUser: only for the current user). It starts the GUI without a visible console window. Pinning to Start cannot be automated on Windows 10/11: pin it once manually via right-click on the entry > *Pin to Start*.
 
 The connection uses Windows authentication (default) or SQL Server authentication
 (`-SqlCredential`, also selectable in step 0 of the GUI wizard).

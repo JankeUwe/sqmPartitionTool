@@ -270,9 +270,50 @@ try {
     }
 }
 
+# ---------------------------------------------------------------------------
+# 6b. Startmenue-Verknuepfung
+#     AllUsers   -> %ProgramData%\Microsoft\Windows\Start Menu\Programs (alle Benutzer)
+#     CurrentUser-> Startmenue des aktuellen Benutzers (kein Admin noetig)
+#     Die Verknuepfung startet powershell.exe direkt (kein Launcher im Zielordner noetig, der
+#     bei jeder Neuinstallation per robocopy /PURGE bereinigt wuerde) und importiert das Modul
+#     per Pfad zur installierten .psd1. Nur wenn der Import-Test erfolgreich war. Die jeweils
+#     andere Verknuepfung wird entfernt, damit kein Doppeleintrag im Startmenue entsteht.
+# ---------------------------------------------------------------------------
+$shortcutName = 'sqmPartitionTool.lnk'
+if ($importOk) {
+    Write-Host "Legt Startmenue-Eintrag an..." -ForegroundColor Cyan
+    try {
+        $menuAll  = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs'
+        $menuUser = [Environment]::GetFolderPath('Programs')
+        $menuDir  = if ($Scope -eq 'AllUsers') { $menuAll } else { $menuUser }
+        $otherLnk = Join-Path $(if ($Scope -eq 'AllUsers') { $menuUser } else { $menuAll }) $shortcutName
+        if (Test-Path $otherLnk) {
+            Remove-Item $otherLnk -Force -ErrorAction SilentlyContinue
+        }
+
+        $psd1Installed = Join-Path $Destination 'sqmPartitionTool.psd1'
+        $psExe         = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $shortcutPath  = Join-Path $menuDir $shortcutName
+        $wshShell      = New-Object -ComObject WScript.Shell
+        $shortcut      = $wshShell.CreateShortcut($shortcutPath)
+        $shortcut.TargetPath       = $psExe
+        $shortcut.Arguments        = "-NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -Command `"Import-Module '$psd1Installed'; Show-sqmPartitionToolGui`""
+        $shortcut.WorkingDirectory = [Environment]::GetFolderPath('UserProfile')
+        $shortcut.Description      = 'sqmPartitionTool - Tabellen partitionieren, archivieren und warten (GUI)'
+        $iconInstalled             = Join-Path $Destination 'Assets\sqmPartitionTool.ico'
+        $shortcut.IconLocation     = if (Test-Path $iconInstalled) { "$iconInstalled,0" } else { "$env:SystemRoot\System32\imageres.dll,109" }
+        $shortcut.Save()
+        Write-Host "Startmenue-Eintrag angelegt: $shortcutPath" -ForegroundColor Green
+    } catch {
+        Write-Warning "Startmenue-Eintrag konnte nicht angelegt werden: $_"
+        Write-Warning "Die GUI laesst sich trotzdem starten: Show-sqmPartitionToolGui"
+    }
+}
+
 if ($importOk) {
     Write-Host ""
     Write-Host "Naechste Schritte:" -ForegroundColor Cyan
+    Write-Host "  Startmenue > 'sqmPartitionTool'  # GUI per Klick" -ForegroundColor Gray
     Write-Host "  Show-sqmPartitionToolGui -SqlInstance ""SQL01""            # GUI-Assistent" -ForegroundColor Gray
     Write-Host "  New-sqmPartitionExtendJob -SqlInstance ""SQL01""           # Wartungs-Job: Sliding-Window-Erweiterung" -ForegroundColor Gray
     Write-Host "  New-sqmPartitionRetentionJob -SqlInstance ""SQL01""        # Wartungs-Job: Retention/Archivierung" -ForegroundColor Gray
