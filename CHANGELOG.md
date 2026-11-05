@@ -1,5 +1,41 @@
 ﻿# sqmPartitionTool — Changelog
 
+## [1.19.0.0] — 2026-11-05
+
+### AlwaysOn / availability groups
+
+The maintenance jobs and the registry were written for a single instance. In an availability group
+they broke in three ways: Agent jobs and `master` (registry) are not replicated, so a failover left
+the new primary without job and without registry; on a secondary the database is not writable, so
+the jobs failed there; and `ADD FILE` is replayed on the secondaries at the identical path, which
+suspends the database on a replica where the directory is missing.
+
+- `sqm_ExtendPartitionWindow` and `jobs/Invoke-sqmPartitionRetentionSweep.ps1` skip a database that
+  is not locally `ONLINE` and `READ_WRITE` (secondary replica, `RESTORING`, log shipping standby,
+  `READ_ONLY`) without an error and report the count (`uebersprungen (nicht schreibbar/Secondary)`).
+  The same job can therefore run on every replica, only the current primary works. A database that
+  does not exist locally is still an error.
+- New `-AllReplicas` on `New-sqmPartitionExtendJob` and `New-sqmPartitionRetentionJob`: creates the
+  job on every replica of the availability groups of `-SqlInstance` (the listener is fine), each
+  with its own instance name, then syncs the registry. The retention job copies the sweep script
+  to remote hosts via `\\<Host>\C$` (before, it was always copied locally). Without AlwaysOn the
+  switch is ignored with a warning.
+- New `Sync-sqmPartitionRegistry`: copies `master.dbo.sqm_PartitionRegistry` from the source
+  (primary/listener) to the other replicas or to explicit `-TargetInstance` values via MERGE
+  (insert, update, delete of rows missing on the source, `-NoDelete`, `-WhatIf`).
+  `LastExtendedAt`/`LastRetentionRunAt` are not overwritten.
+- `New-sqmPartitionFilegroupPlan` (and with it the conversion and `Copy-sqmPartitionedTable`)
+  checks before `ADD FILE` that the directory exists on all other replicas of the database's
+  availability group and aborts naming the replica. New `-SkipReplicaPathCheck`.
+- New private helpers `Get-sqmAgReplica` and `Test-sqmAgReplicaPath`.
+- Docs: new section 4a in the admin handbook, new English handbook `docs/AdminHandbook.en.md`
+  (PDF via `Tools/Build-AdminHandbookPdf.py --lang en`).
+- Tested in the lab (SQL Server 2025 container): skip logic with a `READ_ONLY` database in the
+  procedure and in the sweep script (and not skipped when `READ_WRITE`), registry sync between two
+  instances (insert, update, delete, `-NoDelete`, apostrophe in a table name, preserved
+  `LastExtendedAt`), non-AG behavior of the new functions. Not tested: replica detection and the
+  path check across real secondaries (no availability group in the lab).
+
 ## [1.18.1.0] — 2026-10-17
 
 ### Development: duplicate parameter binding check extended

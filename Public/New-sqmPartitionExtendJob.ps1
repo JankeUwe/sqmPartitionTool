@@ -19,6 +19,11 @@
     Taegliche Startzeit im Format 'HH:mm'. Standard: '02:00'.
 .PARAMETER JobCategory
     Job-Kategorie. Standard: 'Database Maintenance'.
+.PARAMETER AllReplicas
+    AlwaysOn: legt den Job auf JEDEM Replikat der Verfuegbarkeitsgruppe(n) von -SqlInstance an
+    (-SqlInstance darf der Listener sein) und gleicht danach die Registry per
+    Sync-sqmPartitionRegistry auf alle Replikate ab. Die Prozedur ueberspringt Datenbanken, die lokal nicht ONLINE/READ_WRITE sind - effektiv arbeitet nur der aktuelle Primary. Ohne AlwaysOn wird der Schalter mit
+    Warnung ignoriert.
 .PARAMETER Update
     Ueberschreibt einen bestehenden Job gleichen Namens (Step-Command/Schedule werden neu
     geschrieben, sonst idempotent - ein zweiter Aufruf ohne -Update meldet nur den bestehenden
@@ -58,6 +63,9 @@ function New-sqmPartitionExtendJob
 		[string]$JobCategory = 'Database Maintenance',
 
 		[Parameter(Mandatory = $false)]
+		[switch]$AllReplicas,
+
+		[Parameter(Mandatory = $false)]
 		[switch]$Update,
 
 		[Parameter(Mandatory = $false)]
@@ -70,6 +78,35 @@ function New-sqmPartitionExtendJob
 	$functionName = $MyInvocation.MyCommand.Name
 	$connParams = @{ SqlInstance = $SqlInstance }
 	if ($SqlCredential) { $connParams['SqlCredential'] = $SqlCredential }
+
+	# AlwaysOn: Job auf JEDEM Replikat anlegen (Jobs und die Registry in master werden von AlwaysOn
+	# nicht repliziert; nach einem Failover waere sonst kein Job auf dem neuen Primary vorhanden).
+	# Prozedur/Skript pruefen selbst, ob die Datenbank lokal schreibbar ist (nur der Primary arbeitet).
+	if ($AllReplicas)
+	{
+		$modAg = Get-Module -Name sqmPartitionTool
+		$rp = @{ SqlInstance = $SqlInstance }
+		if ($SqlCredential) { $rp['SqlCredential'] = $SqlCredential }
+		$replicaNames = @(& $modAg { param($p) Get-sqmAgReplica @p } $rp | Select-Object -ExpandProperty ReplicaServerName -Unique)
+		if ($replicaNames.Count -eq 0)
+		{
+			Invoke-sqmLogging -Message "'$SqlInstance' gehoert keiner Verfuegbarkeitsgruppe an - -AllReplicas wird ignoriert, Job nur auf dieser Instanz." -FunctionName $functionName -Level "WARNING"
+		}
+		else
+		{
+			$replicaResults = foreach ($replica in $replicaNames)
+			{
+				$jp = @{ SqlInstance = $replica; JobName = $JobName; ScheduleTime = $ScheduleTime; JobCategory = $JobCategory; Update = $Update }
+				if ($SqlCredential) { $jp['SqlCredential'] = $SqlCredential }
+				if ($EnableException) { $jp['EnableException'] = $true }
+				New-sqmPartitionExtendJob @jp
+			}
+			$sp = @{ SqlInstance = $SqlInstance }
+			if ($SqlCredential) { $sp['SqlCredential'] = $SqlCredential }
+			Sync-sqmPartitionRegistry @sp | Out-Null
+			return $replicaResults
+		}
+	}
 
 	try
 	{

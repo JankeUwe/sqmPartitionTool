@@ -21,6 +21,11 @@
 -- PowerShell-Weg (New-sqmPartitionFilegroupPlan) und ist bewusst nicht
 -- Teil dieser Prozedur; PerPeriod-Tabellen muessen manuell erweitert werden.
 --
+-- AlwaysOn / Read-only: Datenbanken, die lokal nicht ONLINE + READ_WRITE sind (Secondary-
+-- Replikat, RESTORING, Log-Shipping-Standby, READ_ONLY), werden ohne Fehler uebersprungen -
+-- DDL waere dort nicht moeglich. Der Job kann deshalb auf JEDEM Replikat laufen; nur der
+-- aktuelle Primary arbeitet. Eine lokal nicht vorhandene Datenbank bleibt ein Fehler.
+--
 -- Jede Tabelle wird per TRY/CATCH isoliert behandelt (ein Fehler bei einer
 -- Tabelle blockiert nicht die anderen), Fehler werden am Ende aggregiert
 -- als RAISERROR gemeldet (gleiches Muster wie -ContinueOnError in
@@ -36,7 +41,7 @@ BEGIN
             @Granularity VARCHAR(10), @BoundaryType VARCHAR(10), @SurrogateDateFormat VARCHAR(10),
             @FilegroupStrategy VARCHAR(10), @FutureBufferPeriods INT;
 
-    DECLARE @ProcessedCount INT = 0, @ExtendedCount INT = 0, @SkippedCount INT = 0,
+    DECLARE @ProcessedCount INT = 0, @ExtendedCount INT = 0, @SkippedCount INT = 0, @NotWritableCount INT = 0,
             @ErrorCount INT = 0, @ErrorSummary NVARCHAR(MAX) = N'';
 
     DECLARE reg_cursor CURSOR LOCAL FAST_FORWARD FOR
@@ -52,6 +57,14 @@ BEGIN
     WHILE @@FETCH_STATUS = 0
     BEGIN
         SET @ProcessedCount += 1;
+
+        IF DB_ID(@DatabaseName) IS NOT NULL
+           AND (ISNULL(CONVERT(NVARCHAR(60), DATABASEPROPERTYEX(@DatabaseName, N'Status')), N'') <> N'ONLINE'
+                OR ISNULL(CONVERT(NVARCHAR(60), DATABASEPROPERTYEX(@DatabaseName, N'Updateability')), N'') <> N'READ_WRITE')
+        BEGIN
+            SET @NotWritableCount += 1;
+            GOTO NextTable;
+        END
 
         IF @FilegroupStrategy <> 'Single'
         BEGIN
@@ -189,6 +202,7 @@ END
     PRINT N'sqm_ExtendPartitionWindow: ' + CAST(@ProcessedCount AS VARCHAR(10)) + N' Tabelle(n) geprueft, ' +
         CAST(@ExtendedCount AS VARCHAR(10)) + N' Boundary(s) hinzugefuegt, ' +
         CAST(@SkippedCount AS VARCHAR(10)) + N' uebersprungen (PerPeriod), ' +
+        CAST(@NotWritableCount AS VARCHAR(10)) + N' uebersprungen (nicht schreibbar/Secondary), ' +
         CAST(@ErrorCount AS VARCHAR(10)) + N' Fehler.';
 
     IF @ErrorCount > 0

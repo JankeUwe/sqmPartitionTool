@@ -72,12 +72,17 @@ Invoke-sqmTablePartitionConversion -SqlInstance "SQL01" -Database "Sales" `
 New-sqmPartitionExtendJob -SqlInstance "SQL01"
 New-sqmPartitionRetentionJob -SqlInstance "SQL01"
 
+# AlwaysOn: Jobs auf allen Replikaten anlegen, Registry abgleichen
+New-sqmPartitionExtendJob    -SqlInstance "AGLISTENER01" -AllReplicas
+New-sqmPartitionRetentionJob -SqlInstance "AGLISTENER01" -AllReplicas
+Sync-sqmPartitionRegistry    -SqlInstance "AGLISTENER01"
+
 # Partitionierung wieder entfernen (erst ansehen, dann ausfuehren)
 Remove-sqmTablePartitioning -SqlInstance "SQL01" -Database "Sales" `
     -Schema "dbo" -Table "OrderHistory" -RemoveEmptyFilegroups -WhatIf
 ```
 
-Siehe [docs/AdminHandbuch.md](docs/AdminHandbuch.md) für detaillierte Ablaufplaene je Szenario
+Siehe [docs/AdminHandbuch.md](docs/AdminHandbuch.md) (English: [docs/AdminHandbook.en.md](docs/AdminHandbook.en.md)) für detaillierte Ablaufplaene je Szenario
 und [CHANGELOG.md](CHANGELOG.md) für die Versionshistorie.
 
 ## Lizenz

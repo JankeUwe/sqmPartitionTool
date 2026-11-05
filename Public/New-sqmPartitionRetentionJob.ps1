@@ -27,6 +27,11 @@
     Wochentag. Standard: 'Sunday'.
 .PARAMETER JobCategory
     Job-Kategorie. Standard: 'Database Maintenance'.
+.PARAMETER AllReplicas
+    AlwaysOn: legt den Job auf JEDEM Replikat der Verfuegbarkeitsgruppe(n) von -SqlInstance an
+    (-SqlInstance darf der Listener sein) und gleicht danach die Registry per
+    Sync-sqmPartitionRegistry auf alle Replikate ab. Das Skript wird per \\<Host>\C$ auf die anderen Hosts kopiert (dort muessen sqmPartitionTool, sqmSQLTool und dbatools installiert sein) und ueberspringt Datenbanken, die lokal nicht ONLINE/READ_WRITE sind - effektiv arbeitet nur der aktuelle Primary. Ohne AlwaysOn wird der Schalter mit
+    Warnung ignoriert.
 .PARAMETER Update
     Ueberschreibt einen bestehenden Job gleichen Namens.
 .PARAMETER SqlCredential
@@ -68,6 +73,9 @@ function New-sqmPartitionRetentionJob
 		[string]$JobCategory = 'Database Maintenance',
 
 		[Parameter(Mandatory = $false)]
+		[switch]$AllReplicas,
+
+		[Parameter(Mandatory = $false)]
 		[switch]$Update,
 
 		[Parameter(Mandatory = $false)]
@@ -81,15 +89,51 @@ function New-sqmPartitionRetentionJob
 	$connParams = @{ SqlInstance = $SqlInstance }
 	if ($SqlCredential) { $connParams['SqlCredential'] = $SqlCredential }
 
+	# AlwaysOn: Job auf JEDEM Replikat anlegen (Jobs und die Registry in master werden von AlwaysOn
+	# nicht repliziert; nach einem Failover waere sonst kein Job auf dem neuen Primary vorhanden).
+	# Prozedur/Skript pruefen selbst, ob die Datenbank lokal schreibbar ist (nur der Primary arbeitet).
+	if ($AllReplicas)
+	{
+		$modAg = Get-Module -Name sqmPartitionTool
+		$rp = @{ SqlInstance = $SqlInstance }
+		if ($SqlCredential) { $rp['SqlCredential'] = $SqlCredential }
+		$replicaNames = @(& $modAg { param($p) Get-sqmAgReplica @p } $rp | Select-Object -ExpandProperty ReplicaServerName -Unique)
+		if ($replicaNames.Count -eq 0)
+		{
+			Invoke-sqmLogging -Message "'$SqlInstance' gehoert keiner Verfuegbarkeitsgruppe an - -AllReplicas wird ignoriert, Job nur auf dieser Instanz." -FunctionName $functionName -Level "WARNING"
+		}
+		else
+		{
+			$replicaResults = foreach ($replica in $replicaNames)
+			{
+				$jp = @{ SqlInstance = $replica; JobName = $JobName; ScheduleTime = $ScheduleTime; JobCategory = $JobCategory; Update = $Update }
+				$jp['ScheduleDay'] = $ScheduleDay
+				if ($SqlCredential) { $jp['SqlCredential'] = $SqlCredential }
+				if ($EnableException) { $jp['EnableException'] = $true }
+				New-sqmPartitionRetentionJob @jp
+			}
+			$sp = @{ SqlInstance = $SqlInstance }
+			if ($SqlCredential) { $sp['SqlCredential'] = $SqlCredential }
+			Sync-sqmPartitionRegistry @sp | Out-Null
+			return $replicaResults
+		}
+	}
+
 	try
 	{
 		# Wrapper-Skript an den installierten Modulpfad kopieren (Quelle liegt im Modul selbst).
+		# $deployedScript = Pfad aus Sicht des SQL-Servers (steht im Job-Step); $copyTarget = wohin
+		# dieser Aufruf das Skript kopiert: lokal direkt, fuer einen anderen Host ueber \\<Host>\C$
+		# (sqmPartitionTool, sqmSQLTool und dbatools muessen dort installiert sein).
 		$modulePath = 'C:\Program Files\WindowsPowerShell\Modules\sqmPartitionTool'
-		$jobsDir = Join-Path $modulePath 'jobs'
+		$deployedScript = Join-Path $modulePath 'jobs\Invoke-sqmPartitionRetentionSweep.ps1'
+		$hostName = (($SqlInstance -split '\\')[0] -split ',')[0]
+		$isLocalHost = ($hostName -in @($env:COMPUTERNAME, 'localhost', '.', '127.0.0.1')) -or ($hostName -like "$env:COMPUTERNAME.*")
+		$copyTarget = if ($isLocalHost) { $deployedScript } else { "\\$hostName\C$\Program Files\WindowsPowerShell\Modules\sqmPartitionTool\jobs\Invoke-sqmPartitionRetentionSweep.ps1" }
+		$jobsDir = Split-Path $copyTarget -Parent
 		if (-not (Test-Path $jobsDir)) { New-Item -ItemType Directory -Path $jobsDir -Force | Out-Null }
 		$sourceScript = Join-Path (Split-Path $PSScriptRoot -Parent) 'jobs\Invoke-sqmPartitionRetentionSweep.ps1'
-		$deployedScript = Join-Path $jobsDir 'Invoke-sqmPartitionRetentionSweep.ps1'
-		if (Test-Path $sourceScript) { Copy-Item -Path $sourceScript -Destination $deployedScript -Force }
+		if (Test-Path $sourceScript) { Copy-Item -Path $sourceScript -Destination $copyTarget -Force }
 
 		$psExePath = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
 		$command = "$psExePath -NoProfile -ExecutionPolicy Bypass -File `"$deployedScript`" -SqlInstance `"$SqlInstance`""

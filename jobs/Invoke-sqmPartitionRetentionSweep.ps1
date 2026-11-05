@@ -1,4 +1,4 @@
-# ============================================================================
+﻿# ============================================================================
 # Invoke-sqmPartitionRetentionSweep.ps1
 # Wird von New-sqmPartitionRetentionJob als CmdExec-SQL-Agent-Job-Step
 # aufgerufen (analog zu sqmSQLTool\jobs\Sync-Job.ps1 - ein Job fuer die ganze
@@ -39,6 +39,7 @@ $tables = Get-sqmPartitionRegistry -SqlInstance $SqlInstance -ActiveOnly |
     Where-Object { $_.RetentionValue -isnot [System.DBNull] -and $_.RetentionValue }
 
 $processed = 0
+$skippedNotWritable = 0
 $retiredPartitions = 0
 $errors = [System.Collections.Generic.List[string]]::new()
 
@@ -47,6 +48,20 @@ foreach ($t in $tables)
     $processed++
     try
     {
+        # AlwaysOn/Read-only: Datenbank lokal nicht ONLINE + READ_WRITE (Secondary, RESTORING,
+        # Standby) -> ueberspringen, kein Fehler. So kann derselbe Job auf allen Replikaten laufen;
+        # nur der aktuelle Primary arbeitet. Lokal nicht vorhandene DB bleibt ein Fehler (DB_ID NULL).
+        $dbLit = $t.DatabaseName.Replace("'", "''")
+        $dbState = Invoke-DbaQuery -SqlInstance $SqlInstance -Database master -ErrorAction Stop -EnableException -As PSObject `
+            -Query "SELECT DB_ID(N'$dbLit') AS DbId, CONVERT(NVARCHAR(60), DATABASEPROPERTYEX(N'$dbLit', 'Status')) AS St, CONVERT(NVARCHAR(60), DATABASEPROPERTYEX(N'$dbLit', 'Updateability')) AS Upd;" |
+            Select-Object -First 1
+        if ($null -ne $dbState.DbId -and $dbState.DbId -isnot [System.DBNull] -and ($dbState.St -ne 'ONLINE' -or $dbState.Upd -ne 'READ_WRITE'))
+        {
+            $skippedNotWritable++
+            Write-Output "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - '$($t.DatabaseName)' uebersprungen (Status $($dbState.St), $($dbState.Upd) - kein Primary/nicht schreibbar)."
+            continue
+        }
+
         $cutoff = if ($t.RetentionUnit -eq 'Years') { (Get-Date).AddYears(-[int]$t.RetentionValue) } else { (Get-Date).AddMonths(-[int]$t.RetentionValue) }
 
         $archiveParams = @{
@@ -117,7 +132,7 @@ foreach ($t in $tables)
     }
 }
 
-Write-Output "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - sqm_PartitionRetentionSweep abgeschlossen: $processed Tabelle(n) geprueft, $retiredPartitions Partition(en) entfernt, $($errors.Count) Fehler."
+Write-Output "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - sqm_PartitionRetentionSweep abgeschlossen: $processed Tabelle(n) geprueft, $retiredPartitions Partition(en) entfernt, $skippedNotWritable uebersprungen (nicht schreibbar/Secondary), $($errors.Count) Fehler."
 
 if ($errors.Count -gt 0)
 {

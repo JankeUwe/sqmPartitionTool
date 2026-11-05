@@ -8,7 +8,7 @@ Zielgruppe dieses Handbuchs: SQL-Server-DBAs, die das Tool operativ einsetzen (n
 Entwicklung des Moduls selbst). Fuer die Versionshistorie siehe [CHANGELOG.md](../CHANGELOG.md),
 fuer eine Kurzuebersicht [README.md](../README.md).
 
-Stand: 2026-10-07, sqmPartitionTool 1.18.0.0 (mit sqmDataTransfer 0.1.23.0).
+Stand: 2026-11-05, sqmPartitionTool 1.19.0.0 (mit sqmDataTransfer 0.1.23.0).
 
 ---
 
@@ -18,6 +18,7 @@ Stand: 2026-10-07, sqmPartitionTool 1.18.0.0 (mit sqmDataTransfer 0.1.23.0).
 - [2. Voraussetzungen und Installation](#2-voraussetzungen-und-installation)
 - [3. Ablaufplan A: Bestehende Tabelle in-place partitionieren](#3-ablaufplan-a-bestehende-tabelle-in-place-partitionieren)
 - [4. Ablaufplan B: Automatische Wartung einrichten (Sliding-Window + Retention)](#4-ablaufplan-b-automatische-wartung-einrichten)
+- [4a. AlwaysOn / Verfuegbarkeitsgruppen](#4a-alwayson--verfuegbarkeitsgruppen)
 - [5. Ablaufplan C: Tabelle in eine Archiv-Datenbank migrieren (Cutover)](#5-ablaufplan-c-tabelle-in-eine-archiv-datenbank-migrieren)
 - [5a. Ablaufplan D: Bereits partitionierte Tabelle mit neuer Partitionierung kopieren](#5a-ablaufplan-d-bereits-partitionierte-tabelle-mit-neuer-partitionierung-kopieren)
 - [5b. Wie die Daten kopiert werden (Kopier-Engine von sqmDataTransfer)](#5b-wie-die-daten-kopiert-werden)
@@ -44,6 +45,9 @@ Tabelle aktiv bleibt**:
 | **D** — Neu-partitionierte Kopie | `Copy-sqmPartitionedTable` | **Unveraendert, bleibt aktiv** (keine Umbenennung, kein Cutover) | Eine **bereits partitionierte** Tabelle soll zusaetzlich als eigenstaendige Kopie mit **anderer** Granularitaet/Filegroup-Strategie in einer anderen Datenbank existieren (z.B. Reporting-Abzug mit groeberer Granularitaet) |
 | **E** — Partitionierung entfernen | `Remove-sqmTablePartitioning` | Bleibt in derselben DB, liegt wieder unpartitioniert auf einer Filegroup | Partitionierung soll zurueckgenommen werden (z.B. Konvertierung aus A rueckgaengig machen) |
 
+**AlwaysOn:** liegt die Datenbank in einer Verfuegbarkeitsgruppe, gelten fuer die Jobs (B1/B2)
+zusaetzliche Schritte, siehe Abschnitt 4a.
+
 **Faustregel:** Wenn die Tabelle **in der Quelldatenbank bleiben** soll → A (+ optional B1/B2).
 Wenn die Tabelle **komplett in eine andere Datenbank** soll (z.B. Archiv-Instanz, separate
 Datenbank mit weniger Backup-/Storage-Anforderungen) → C. Wenn die Quelltabelle **bereits
@@ -63,6 +67,8 @@ soll (kein Cutover, keine Umbenennung) → D.
 - Ein SQL-Server-Login mit ausreichenden Rechten auf der/den Zieldatenbank(en): `ALTER` auf die
   betroffene(n) Tabelle(n)/Datenbank(en), `CREATE`/`ALTER PROCEDURE`, sowie fuer die
   SQL-Agent-Jobs (Szenario B) Rechte auf `msdb`.
+- Bei **AlwaysOn**: die Module muessen auf **jedem** Replikat installiert sein, auf dem ein
+  Wartungs-Job laufen soll (Abschnitt 4a).
 - Fuer Szenario C und D: die **Zieldatenbank muss vom Admin vorher angelegt sein**, das Tool legt
   sie nicht automatisch an (bewusste Entscheidung, da Dateigroessen, Pfade und Recovery-Modell
   admin-spezifisch sind).
@@ -191,6 +197,87 @@ vorherige Registrierung — die Grenzwerte jeder Partition werden direkt gelesen
 Eine einzige Bestaetigungsabfrage fuer den ganzen Lauf (zeigt vorab die Anzahl betroffener
 Partitionen), nicht eine pro Partition. `-WhatIf` zeigt, wie viele Partitionen betroffen waeren,
 ohne etwas zu aendern.
+
+---
+
+## 4a. AlwaysOn / Verfuegbarkeitsgruppen
+
+Die Wartungs-Jobs aus Ablaufplan B und die Funktionen des Moduls sind AlwaysOn-faehig. Vier Dinge
+muessen dafuer beachtet werden, weil AlwaysOn sie **nicht** repliziert bzw. nur auf dem Primary
+erlaubt:
+
+| Thema | Problem ohne Beruecksichtigung | Loesung im Modul |
+|---|---|---|
+| SQL-Agent-Jobs | Jobs liegen in `msdb`, nicht in der AG. Nach einem Failover gibt es auf dem neuen Primary keinen Job. | `-AllReplicas` legt den Job auf **jedem** Replikat an. |
+| Registry `master.dbo.sqm_PartitionRegistry` | `master` ist nicht Teil der AG. Der neue Primary hat keine oder eine veraltete Registry, beide Jobs laufen ins Leere. | `Sync-sqmPartitionRegistry` gleicht die Registry auf alle Replikate ab (`-AllReplicas` ruft es automatisch auf). |
+| DDL (SPLIT/MERGE/SWITCH) | Auf einem Secondary ist die Datenbank nicht schreibbar, der Job wuerde mit Fehler enden. | `sqm_ExtendPartitionWindow` und der Retention-Sweep **ueberspringen** Datenbanken, die lokal nicht `ONLINE` und `READ_WRITE` sind. Der Job endet auf einem Secondary erfolgreich, nur der aktuelle Primary arbeitet. |
+| `ADD FILE` (neue Filegroups) | Die Datei wird per Log auf den Secondaries **am identischen Pfad** angelegt. Fehlt das Verzeichnis dort, wird die Datenbank auf dem Secondary suspendiert. | `New-sqmPartitionFilegroupPlan` (und damit Konvertierung und Kopie) prueft das Verzeichnis vorher auf allen Replikaten und bricht ab. |
+
+**1. Jobs auf allen Replikaten einrichten** (gegen den Listener oder einen beliebigen Knoten):
+
+```powershell
+New-sqmPartitionExtendJob    -SqlInstance "AGLISTENER01" -AllReplicas -WhatIf   # ansehen
+New-sqmPartitionExtendJob    -SqlInstance "AGLISTENER01" -AllReplicas
+New-sqmPartitionRetentionJob -SqlInstance "AGLISTENER01" -AllReplicas
+```
+
+- Die Replikate werden aus `sys.availability_replicas` aller Verfuegbarkeitsgruppen der Instanz
+  ermittelt. Auf jedem Replikat wird der Job mit dessen **eigenem** Instanznamen angelegt (der
+  Retention-Step ruft das Sweep-Skript mit `-SqlInstance <lokaler Knoten>` auf).
+- Zum Schluss wird die Registry vom angegebenen `-SqlInstance` (Listener = Primary) auf die
+  anderen Replikate abgeglichen.
+- Der Retention-Job kopiert das Sweep-Skript ueber `\\<Host>\C$` in den Modulordner der anderen
+  Hosts. Dort muessen `sqmPartitionTool`, `sqmSQLTool` und `dbatools` installiert sein
+  (Abschnitt 2), und das ausfuehrende Konto braucht Zugriff auf die Admin-Freigabe.
+- Ohne AlwaysOn wird `-AllReplicas` mit Warnung ignoriert, der Job entsteht nur auf der
+  angegebenen Instanz.
+- **Ohne `-AllReplicas`** entsteht der Job nur auf der angegebenen Instanz. Mit dem Listener als
+  `-SqlInstance` ist das der aktuelle Primary, nach einem Failover fehlt der Job auf dem neuen.
+
+**2. Registry nach jeder Aenderung abgleichen.** `Register-sqmPartitionTable`,
+`Remove-sqmPartitionRegistration` und die Konvertierung schreiben nur in die Registry der
+verbundenen Instanz. Danach:
+
+```powershell
+Sync-sqmPartitionRegistry -SqlInstance "AGLISTENER01" -WhatIf
+Sync-sqmPartitionRegistry -SqlInstance "AGLISTENER01"
+# explizite Ziele:  -TargetInstance "SQL02","SQL03"
+# Zeilen nur auf dem Ziel behalten:  -NoDelete
+```
+
+Die Quelle ist massgeblich: fehlende Zeilen kommen dazu, abweichende werden angeglichen, Zeilen,
+die nur auf dem Ziel stehen, werden entfernt (ausser `-NoDelete`). `LastExtendedAt` und
+`LastRetentionRunAt` bleiben auf jedem Replikat unberuehrt, sie gehoeren zu dessen eigenen
+Job-Laeufen. Auf einer Instanz ohne AlwaysOn passiert nichts.
+
+**3. Neue Filegroups.** `-FilePath` (bzw. der Standard-Datenpfad des Primary) muss auf allen
+Replikaten existieren, gleicher Pfad, Schreibrecht fuer das SQL-Server-Dienstkonto. Fehlt er auf
+einem Replikat, bricht die Funktion **vor** dem `ADD FILE` mit dem Namen des Replikats ab.
+`-SkipReplicaPathCheck` schaltet die Pruefung ab, wenn die Pfade bekanntermassen vorhanden sind.
+
+**4. Was auf einem Secondary passiert.** Der Extend-Job meldet z.B.
+`... 1 uebersprungen (nicht schreibbar/Secondary), 0 Fehler.`, der Retention-Job schreibt je
+Datenbank `'<DB>' uebersprungen (Status ONLINE, READ_ONLY ...)`. Beides ist Normalbetrieb, kein
+Fehler. Eine lokal gar nicht vorhandene Datenbank bleibt dagegen ein Fehler. Eine bewusst
+schreibgeschuetzte (`READ_ONLY`) Datenbank wird aus demselben Grund ebenfalls uebersprungen.
+
+**5. Manuelle Aufrufe.** `Invoke-sqmPartitionRetention`, `Invoke-sqmTablePartitionConversion`,
+`Copy-sqmPartitionedTable` usw. fuehren DDL aus: immer gegen den **Listener** oder den aktuellen
+Primary aufrufen. Gegen einen Secondary scheitern sie an der schreibgeschuetzten Datenbank.
+
+**Grenzen und Hinweise:**
+
+- Die **Archiv-Datenbank** (`-ArchiveDatabaseName`) muss auf derselben Instanz liegen. Sie sollte
+  selbst Mitglied der Verfuegbarkeitsgruppe sein oder auf jedem Knoten unter demselben Namen
+  existieren, sonst scheitert die Archivierung nach einem Failover.
+- Der Registry-Abgleich ist **manuell** (bzw. beim Anlegen der Jobs mit `-AllReplicas`), nicht
+  laufend. Wer oft registriert, ruft `Sync-sqmPartitionRegistry` am Ende des eigenen Skripts auf.
+- Stand der Verifikation: die Ueberspringen-Logik (READ_ONLY-Datenbank in der T-SQL-Prozedur und im
+  Sweep-Skript), der Registry-Abgleich (Insert, Update, Delete, `-NoDelete`, Apostrophe in
+  Namen) und das Verhalten auf einer Instanz ohne AlwaysOn sind im Labor getestet. Die
+  Replikat-Erkennung und die Pfadpruefung ueber echte Secondaries sind im Labor mangels
+  Verfuegbarkeitsgruppe nur fuer den Nicht-AG-Fall geprueft: den ersten Einsatz in einer echten
+  AG mit `-WhatIf` beginnen.
 
 ---
 
@@ -627,6 +714,17 @@ Ladepfad.
 - **Remove-sqmTablePartitioning: Partition Scheme bleibt bestehen**: ein anderes Objekt verwendet
   es noch (die Warnung nennt es). Wird beim Entfernen der Partitionierung des letzten Objekts
   abgeraeumt.
+- **Nach einem Failover verarbeiten die Jobs keine Tabellen** (Registry leer oder veraltet):
+  `master` wird von AlwaysOn nicht repliziert. `Sync-sqmPartitionRegistry` vom frueheren Primary
+  oder Listener aus ausfuehren, kuenftig Jobs mit `-AllReplicas` anlegen (Abschnitt 4a).
+- **Job laeuft auf dem Secondary "erfolgreich", tut aber nichts:** gewollt, Datenbanken, die lokal
+  nicht ONLINE/READ_WRITE sind, werden uebersprungen. Die Zeile `uebersprungen (nicht
+  schreibbar/Secondary)` in der Job-Ausgabe belegt das.
+- **"Verzeichnis ... existiert nicht auf allen Replikaten der Verfuegbarkeitsgruppe"** beim Anlegen
+  von Filegroups: das Verzeichnis auf den genannten Replikaten anlegen (gleicher Pfad, Rechte
+  fuer das SQL-Dienstkonto). Andernfalls wuerde `ADD FILE` dort die Datenbank suspendieren.
+- **`New-sqmPartitionRetentionJob -AllReplicas`: Skript nicht kopierbar:** der Zugriff auf
+  `\\<Host>\C$` fehlt oder `sqmPartitionTool` ist auf dem Host nicht installiert.
 - **Remove-sqmTablePartitioning: Filegroup nicht entfernt**: im FULL-Recovery-Modell ist eine
   geleerte Datei oft erst nach der naechsten Protokollsicherung entfernbar. Danach mit
   `ALTER DATABASE ... REMOVE FILE`/`REMOVE FILEGROUP` nacharbeiten.

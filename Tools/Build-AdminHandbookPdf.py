@@ -14,7 +14,8 @@ Beispiel sqmDataTransfer:
         --product sqmDataTransfer \
         --subtitle "Move table data between SQL Server instances, resumable and verified"
 
-Das Datum auf dem Deckblatt kommt aus der Zeile "Stand: ..." im Markdown.
+Das Datum auf dem Deckblatt kommt aus der Zeile "Stand: ..." (bzw. "As of: ..." bei --lang en) im Markdown.
+Mit --lang en sind Deckblatt und Fusszeile englisch (Beispiel: docs/AdminHandbook.en.md).
 Benoetigt: Python 3, pip install markdown xhtml2pdf (Windows-Schriften Arial/Consolas).
 Identisch in sqmPartitionTool und sqmDataTransfer - Aenderungen in beiden Repos nachziehen.
 """
@@ -82,14 +83,14 @@ def register_fonts():
     pisa_default.DEFAULT_FONT['mono'] = 'Mono'
 
 
-def build(md_path, out_path, product, subtitle):
+def build(md_path, out_path, product, subtitle, lang='de'):
     text = open(md_path, encoding='utf-8-sig').read()
     # Relative Links (CHANGELOG.md, README.md) zeigen im PDF ins Leere - auf GitHub umbiegen
     repo = os.path.basename(os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(md_path)), '..')))
     text = re.sub(r'\]\(\.\./([^)#]+)\)',
                   lambda m: '](https://github.com/JankeUwe/%s/blob/main/%s)' % (repo, m.group(1)), text)
 
-    m = re.search(r'^Stand:\s*([^\n,]+)', text, re.M)
+    m = re.search(r'^(?:Stand|As of):\s*([^\n,]+)', text, re.M)
     stand = m.group(1).strip().rstrip('.') if m else datetime.date.today().isoformat()
 
     body = markdown.markdown(text, extensions=['tables', 'fenced_code', 'sane_lists', 'toc'])
@@ -105,15 +106,20 @@ def build(md_path, out_path, product, subtitle):
                   body, flags=re.S)
     register_fonts()
 
+    if lang == 'en':
+        L = ('Admin Handbook', 'Page', 'of', 'As of')
+    else:
+        L = ('Admin-Handbuch', 'Seite', 'von', 'Stand')
+
     html = '''<html><head><meta charset="utf-8"><style>%s</style></head><body>
-<div id="footerContent">%s Admin-Handbuch &middot; dtcSoftware / Uwe Janke &middot; www.powershelldba.de &middot; Seite <pdf:pagenumber/> von <pdf:pagecount/></div>
-<div class="cover-kicker">Admin-Handbuch</div>
+<div id="footerContent">%s %s &middot; dtcSoftware / Uwe Janke &middot; www.powershelldba.de &middot; %s <pdf:pagenumber/> %s <pdf:pagecount/></div>
+<div class="cover-kicker">%s</div>
 <div class="cover-title">%s</div>
 <div class="cover-sub">%s</div>
-<div class="cover-meta">dtcSoftware &middot; Uwe Janke &middot; www.powershelldba.de<br/>Stand: %s</div>
+<div class="cover-meta">dtcSoftware &middot; Uwe Janke &middot; www.powershelldba.de<br/>%s: %s</div>
 <pdf:nextpage/>
 %s
-</body></html>''' % (CSS, product, product, subtitle, stand, body)
+</body></html>''' % (CSS, product, L[0], L[1], L[2], L[0], product, subtitle, L[3], stand, body)
 
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     with open(out_path, 'wb') as fh:
@@ -129,5 +135,6 @@ if __name__ == '__main__':
     ap.add_argument('--out', required=True)
     ap.add_argument('--product', required=True)
     ap.add_argument('--subtitle', required=True)
+    ap.add_argument('--lang', choices=['de', 'en'], default='de')
     a = ap.parse_args()
-    build(a.md, a.out, a.product, a.subtitle)
+    build(a.md, a.out, a.product, a.subtitle, a.lang)

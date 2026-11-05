@@ -51,6 +51,10 @@
     angelegte Filegroups - eine bereits vorhandene wird nicht verschoben (Warnung, wenn ihre
     Dateien woanders liegen).
 
+.PARAMETER SkipReplicaPathCheck
+    Ueberspringt die AlwaysOn-Pruefung, ob -FilePath (bzw. der Standard-Datenpfad) auf allen
+    Secondary-Replikaten existiert. Ohne diese Pruefung wuerde ADD FILE bei fehlendem Verzeichnis
+    die Datenbank auf dem Secondary suspendieren. Ohne AlwaysOn hat der Schalter keine Wirkung.
 .PARAMETER SqlCredential
     Optionales PSCredential.
 
@@ -94,6 +98,9 @@ function New-sqmPartitionFilegroupPlan
 
 		[Parameter(Mandatory = $false)]
 		[string]$FilePath,
+
+		[Parameter(Mandatory = $false)]
+		[switch]$SkipReplicaPathCheck,
 
 		[Parameter(Mandatory = $false)]
 		[System.Management.Automation.PSCredential]$SqlCredential
@@ -186,6 +193,26 @@ function New-sqmPartitionFilegroupPlan
 		catch
 		{
 			$msg = "Zielverzeichnis '$FilePath' auf '$SqlInstance' nicht verwendbar (existiert das Laufwerk auf dem Server? Rechte des SQL-Server-Dienstkontos?): $($_.Exception.Message)"
+			Invoke-sqmLogging -Message $msg -FunctionName $functionName -Level "ERROR"
+			throw $msg
+		}
+	}
+
+	# AlwaysOn: ADD FILE wird per Log auf die Secondaries repliziert und legt die Datei dort am
+	# IDENTISCHEN Pfad an - fehlt das Verzeichnis, wird die Datenbank auf dem Secondary suspendiert.
+	if ($toCreate.Count -gt 0 -and -not $SkipReplicaPathCheck)
+	{
+		try
+		{
+			$replicaMissing = @(Test-sqmAgReplicaPath -SqlInstance $SqlInstance -Database $Database -Path $FilePath -SqlCredential $SqlCredential)
+		}
+		catch
+		{
+			throw "AlwaysOn-Replikat-Pruefung fehlgeschlagen: $($_.Exception.Message) (mit -SkipReplicaPathCheck ueberspringbar, wenn die Pfade bekanntermassen existieren)."
+		}
+		if ($replicaMissing.Count -gt 0)
+		{
+			$msg = "Verzeichnis '$FilePath' existiert nicht auf allen Replikaten der Verfuegbarkeitsgruppe von '$Database': $($replicaMissing -join '; '). ADD FILE wuerde dort die Datenbank suspendieren. Verzeichnis auf diesen Replikaten anlegen (gleicher Pfad, Rechte fuer das SQL-Dienstkonto) oder -SkipReplicaPathCheck angeben."
 			Invoke-sqmLogging -Message $msg -FunctionName $functionName -Level "ERROR"
 			throw $msg
 		}
